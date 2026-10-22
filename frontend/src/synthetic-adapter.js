@@ -1,89 +1,57 @@
 import { WorkspaceAdapter } from './workspace-adapter.js';
-export const scenarios = { normal:'正常项目', empty:'空项目', noArtifacts:'无成果', loading:'加载中', failure:'加载失败', stale:'过期预览' };
-const sections = [
-  ['文件分类与来源记录','按需求、方案、验证与会话报告分类。来源不明时明确记录未知，不把导入批次当作 Session；一个任务可以关联多个会话，一个会话也能贡献给多个任务。'],
-  ['导入执行与结果校验','逐项检查格式和完整性。成功项保留独立结果；失败项展示具体原因，修正后单独重试。已解析只是来源处理事实，不能据此判定任务已验收。'],
-  ['独立失败处理与重试','失败不会回滚同批成功项。重试沿用对应文件身份，新的发送范围必须重新授权。不得把摘要作为全文，来源不可读时保留受限提示。'],
-  ['版本关系与证据','内容更新形成独立版本。证据绑定成果版本，v1 的验证不能无条件沿用到 v2。版本归并不提升权威性，不替代人工确认。'],
-  ['任务与硬依赖','四种生命周期与阻塞、待复核原因分别呈现。前置成果待复核时，历史验收记录仍保留，但不能直接释放其下游依赖。'],
-  ['候选与正式状态','报告中的完成声明只形成候选依据。普通项按实际选择确认；冲突单独处理。拒绝和暂缓均不生效，旧预览必须刷新后重新选择。'],
-  ['保存与处理授权','本地原件由用户管理。保存位置和本批模型处理许可互不替代；发送清单包括所选文件以及实际附带的旧基线、摘要和证据。'],
-  ['复用与上下文交接','有效正文仅收录当前适用约束和可复用成果。待复核、冲突和候选放入独立提醒；折叠来源不应减少复制文本中的必要约束。'],
-  ['异常与边界','资料缺失、载入失败和访问受限有不同原因。不得用模糊成功消息掩盖全文缺失；所有模拟操作只更新隔离示例，不写真实项目。'],
-  ['下一步验证','补齐版本匹配、文件隔离和授权拒绝的真实证据，再判断成果适用性。本节是全文末段，摘要没有包含这些执行细节。']
-];
-function document(id, version, title, status='available') {
-  return { id, version, title, filename: id==='report'?'session-report.md':id==='baseline'?'requirements.md':`${id}.md`, summary:'梳理导入、来源记录与独立失败处理方案；验证记录仍需补充。', status,
-    reason: { missing:'只有摘要；本地原件尚未重新关联', denied:'当前示例主体无权读取原件', failed:'正文载入失败，请重试', unavailable:'原始来源不可用' }[status],
-    outcome:'形成逐文件处理与候选审查方案，方案说明不代表实现或验收已完成。', pending:['补充 v2 对应验证记录','核对格式错误、缺少字段和独立重试'],
-    source:'合成 Session 04 · 2026-10-19', evidence:[`${version}：仅有合成方案声明，尚无真实执行证据`,'验证缺口：格式隔离与版本匹配'], versions:['v1：初始方案','v2：补充失败隔离说明'],
-    body:status==='available'?sections.map(([heading,text],i)=>({id:`section-${i}`,heading,text:`${text} ${version==='v1'?'本版本为早期草案，不包含后续补充的验证结论。':'本版本保留独立来源及待核验说明。'} ${text}`})):null };
+export const scenarios={normal:'正常项目',empty:'空项目',noArtifacts:'无成果',loading:'加载中',failure:'加载失败',stale:'过期预览'};
+const clone=x=>structuredClone(x);
+const rules=['主基线 R1：全部关键路径必须有验证证据。','证据须匹配任务、成果版本和完成条件。','候选确认后才生效；不自动执行外部 AI。'];
+function document(id,version,title,summary,status='available',batchId='seed'){
+ const facts=id==='baseline'?['R1 定义当前项目范围及唯一有效基线。','任务 A 整理成果，B 补证据，C 等待两者验收。','普通参考不升级为约束，报告较新不自动切换基线。','证据须匹配对象与版本；人工验收明确记录依据。']:id==='report'?[summary,'来源为用户主动提供的合成 Session 04；没有读取外部会话。',version==='v2'?'在 v1 上补充失败隔离、独立重试及版本绑定说明。':'初版只有资料分类与导入清单，不借用 v2 结论。','本报告是工作声明，只建议待验收，不证明已完成。']:id==='review'?[summary,'合成 Session 05 的验证记录，修正后标明 report v2。','包括失败隔离与重试步骤；结构合法不证明实际执行成功。','可作为 A/B 分别审查的证据，不共享验收效力。']:[summary,'项目参考或受限摘要；尚无完整的任务验收依据。','参考笔记 v1 没有后继版本，不包含报告 v2 的结论。','先核对关联及来源，不把摘要当作全文。'];
+ const bodyFacts=facts.concat([id==='report'?'报告身份与修订说明用于识别版本；识别不提升权威。':'本资料 '+version+' 独立保留，不借用其他资料结论。',id==='baseline'?'任务验收采用预授权检查或明确人工验收。':'按关联任务的完成条件逐项核对，不能只检查文件存在。','未解决：尚缺精确版本证据；保留声明与缺口。','一个成果可关联多任务；每个任务的条件和验收独立。','待复核、候选与不可读资料不进入可直接复用成果。','全文末段：补充证据后核对版本，不自动释放硬依赖。']);
+ const headings=['目标与范围','输入与来源','具体成果','验证与限制','版本关系','完成条件','未解决问题','关联任务','复用边界','下一步'];
+ return {id,version,title,authority:id==='baseline'&&batchId==='seed',filename:({baseline:'requirements.md',report:'session-report.md',notes:'handoff-notes.md',review:'review.json'})[id]||id+'.md',summary,status,batchId,source:'合成 '+(id==='baseline'?'基线确认':id==='review'?'Session 05':'Session 04')+' · 2026-10-19',reason:({missing:'本地原件未关联，仅有摘要',denied:'当前示例主体无权读取原件',failed:'正文载入失败，请单独重试',unavailable:'来源不可用，仅保留允许摘要'})[status],outcome:facts[2],pending:[id==='baseline'?'任务 A/B 尚未验收':'核对本资料 '+version+' 的任务条件与精确版本证据'],evidence:[facts[3]],versions:id==='report'?['v1：初始清单','v2：补充失败隔离；识别依据：相同报告身份及修订说明']:['仅有 '+version],body:status==='available'?headings.map((heading,i)=>({id:'section-'+i,heading,text:bodyFacts[i]})):null};
 }
-export function createFixture(scenario='normal', projectId='demo') {
-  const documents=[document('report','v2','导入流程工作报告'),document('report','v1','导入流程工作报告'),document('baseline','v1','需求主基线'),document('notes','v1','交接说明'),document('missing','v1','未关联原件','missing'),document('denied','v1','受限证据','denied'),document('failed','v1','载入失败示例','failed'),document('unavailable','v1','离线来源','unavailable')];
-  const tasks=[
-    {id:'task-1',title:'确认需求主基线',lifecycle:'已验收',blocking:[],review:[],validity:'适用',document:'baseline',version:'v1',x:320,y:30},
-    {id:'task-2',title:'整理会话成果',lifecycle:'待验收',blocking:[],review:['验证记录待补充','成果版本需要复核'],validity:'待复核',document:'report',version:'v2',x:100,y:240},
-    {id:'task-3',title:'补齐验证记录',lifecycle:'进行中',blocking:[],review:[],validity:'适用',document:'failed',version:'v1',x:550,y:240},
-    {id:'task-4',title:'检查成果适用性',lifecycle:'待办',blocking:['整理会话成果尚未验收','补齐验证记录尚未验收'],review:[],validity:'适用',document:'notes',version:'v1',x:320,y:455},
-    {id:'task-5',title:'核对未知来源',lifecycle:'待办',blocking:[],review:['来源需要重新关联'],validity:'待复核',document:'missing',version:'v1',x:780,y:455},
-    {id:'task-6',title:'准备下轮交接',lifecycle:'待办',blocking:['检查成果适用性尚未验收'],review:[],validity:'适用',document:null,version:null,x:320,y:665}
-  ];
-  const candidates=[
-    {id:'c1',title:'新增任务：核对导入清单',current:'当前没有该任务',proposed:'新增待办任务：核对导入清单',impact:'增加一项待办；不会自动执行',kind:'ordinary',state:'pending',base:7},
-    {id:'c2',title:'状态建议：补齐验证记录',current:'进行中',proposed:'待验收',impact:'只提交待验收，不代表已验收；下游硬依赖保持',kind:'ordinary',state:'pending',base:7},
-    {id:'c3',title:'需求约束冲突：验证范围与交付时间',current:'全部关键路径必须有验证证据',proposed:'提前交付并略过部分验证',impact:'涉及已确认约束，需要单独明确取舍；批量操作不包含此项',kind:'conflict',state:'pending',base:7}
-  ];
-  return {mode:'synthetic',projectId,scenario,snapshotVersion:scenario==='stale'?8:7,sourceTime:'2026-10-19 18:30（合成快照）',
-    title:projectId==='demo'?'NextRelay MVP · 示例':'续程实验室 · 示例',
-    tasks:scenario==='empty'?[]:tasks,edges:scenario==='empty'?[]:[['task-1','task-2'],['task-1','task-3'],['task-2','task-4'],['task-3','task-4'],['task-4','task-6']],
-    documents:['empty','noArtifacts'].includes(scenario)?[]:documents,candidates:scenario==='empty'?[]:candidates,
-    batches:[],intentLog:[],handoff:{body:'任务目标：评估成果适用性。\n下一步：先补齐验证记录并完成前置任务验收，再判断成果适用性。',constraints:['候选变更须确认后生效。','验收证据必须匹配适用版本。','不自动发送或运行外部 AI。'],reusable:['requirements.md · v1 · 当前适用的需求主基线'],reminders:['导入报告 v2 待复核，不可直接作为可复用成果。','扩大读取范围的方案尚未确认。','前置任务尚未验收；当前任务受阻塞。'],sources:['合成 Session 04 · session-report.md v2','合成主基线 · requirements.md v1']} };
+function task(id,title,lifecycle,doc,version,x,y,goal){return {id,title,lifecycle,document:doc,version,x,y,goal,validity:'适用',blocking:[],review:[],executable:false,decisions:0,conditions:['成果范围与来源明确','证据匹配精确版本，或用户明确人工验收'],acceptance:lifecycle==='已验收'?'合成用户确认 · R1 · requirements.md v1':null};}
+function candidate(id,title,taskId,current,proposed,effect,kind='ordinary',batchId='seed',version='v1'){return {id,title,taskId,current,proposed,effect,kind,batchId,document:'report',version,state:'pending',base:7,history:[],basis:effect==='add-task'?'report v1「输入与来源」要求单独核对清单。':kind==='conflict'?'报告附带略过验证的建议，与 R1 冲突。':'report v1「验证与限制」：验证清单已整理，需提交验收核对。',impact:kind==='conflict'?'涉及有效约束，必须单独决定。':'只形成所列变更；不代表已验收，不释放下游硬依赖。'};}
+export function createFixture(scenario='normal',projectId='demo'){
+ const docs=[document('baseline','v1','需求主基线 R1','已确认范围、依赖与验收规则。'),document('report','v1','导入流程工作报告','初版分类与导入清单；验证尚未齐备。'),document('notes','v1','项目参考笔记','项目通用参考，说明适用性评估顺序。'),...['missing','denied','failed','unavailable'].map(id=>document(id,'v1',({missing:'未关联原件',denied:'受限证据',failed:'载入失败示例',unavailable:'离线来源'})[id],'来源受限，不能作为完整证据。',id))];
+ const tasks=[task('task-1','确认需求主基线','已验收','baseline','v1',320,30,'确认项目范围与有效 R1 基线。'),task('task-2','整理会话成果','进行中','report','v1',100,240,'整理成果范围、来源与失败恢复方案。'),task('task-3','补齐验证记录','进行中','failed','v1',550,240,'补充版本匹配的验证记录并核对完成条件。'),task('task-4','检查成果适用性','待办',null,null,320,455,'A/B 均验收且成果有效后，判断下一轮可复用内容。'),task('task-5','核对未知来源','待办','missing','v1',780,455,'重新关联原件，核对摘要与来源。'),task('task-6','准备下轮交接','待办',null,null,320,665,'按已确认状态整理下一轮目标与约束。')];tasks[4].review=['来源需要重新关联'];tasks[4].validity='待复核';
+ const s={mode:'synthetic',projectId,scenario,snapshotVersion:scenario==='stale'?8:7,sourceTime:'2026-10-19 18:30（合成快照）',title:projectId==='demo'?'NextRelay MVP · 示例':'续程实验室 · 示例',goal:'整理主动导入的成果、核对证据并接续工作。',tasks:scenario==='empty'?[]:tasks,edges:scenario==='empty'?[]:[['task-1','task-2'],['task-1','task-3'],['task-2','task-4'],['task-3','task-4'],['task-4','task-6']],documents:['empty','noArtifacts'].includes(scenario)?[]:docs,candidates:scenario==='empty'?[]:[candidate('c1','新增任务：核对导入清单','task-7','当前没有该任务','新增待办任务：核对导入清单','add-task'),candidate('c2','状态建议：补齐验证记录','task-3','进行中','待验收','submit'),candidate('c3','需求约束冲突：验证范围与交付时间','task-2','全部关键路径必须有验证证据','提前交付并略过部分验证','retain','conflict')],relations:[],batches:[],changes:[],intentLog:[],constraints:scenario==='empty'?rules.slice(1):rules,sequence:0};
+ for(const t of s.tasks)if(t.document&&s.documents.some(d=>d.id===t.document&&d.version===t.version))s.relations.push({taskId:t.id,document:t.document,version:t.version,state:'confirmed',role:t.id==='task-1'?'约束':'成果'});
+ if(s.documents.length)s.relations.push({taskId:'task-3',document:'report',version:'v1',state:'confirmed',role:'参考'});
+ if(scenario==='noArtifacts')for(const c of s.candidates){c.document=null;c.basis='来源不可读取；请先补充资料。';}
+ recompute(s);return s;
 }
-export class SyntheticAdapter extends WorkspaceAdapter {
-  constructor(scenario='normal',projectId='demo'){super();this.state=createFixture(scenario,projectId);}
-  async read(){return structuredClone(this.state);}
-  async submit(intent){
-    const s=this.state;
-    if(intent.type==='retry-document'){
-      const d=s.documents.find(d=>d.id===intent.id&&d.version===intent.version);
-      if(d?.status!=='failed')throw Error('仅载入失败可重试；来源权限不能由重试绕过');
-      Object.assign(d,document(d.id,d.version,d.title));
-    }else if(intent.type==='refresh-preview'){
-      s.candidates.filter(c=>c.state==='pending').forEach(c=>c.base=s.snapshotVersion);
-    }else if(intent.type==='candidate'){
-      const items=s.candidates.filter(c=>intent.ids.includes(c.id));
-      if(!items.length||items.length!==new Set(intent.ids).size||items.some(c=>c.state!=='pending'))throw Error('选择已失效，请重新选择');
-      if(items.some(c=>c.base!==s.snapshotVersion))throw Error('预览版本已过期，请刷新并重新选择');
-      if(!['confirm','reject','defer'].includes(intent.action))throw Error('未知审查动作');
-      if(items.some(c=>c.kind!=='ordinary')&&(items.length!==1||!intent.separate))throw Error('冲突必须单独处理');
-      if(items.some(c=>c.kind==='conflict')&&intent.action==='confirm'&&!intent.resolution)throw Error('请选择冲突解决方向');
-      items.forEach(c=>{c.state=intent.action;c.resolution=intent.resolution;});
-      if(intent.action==='confirm'){
-        if(items.some(c=>c.id==='c1'))s.tasks.push({id:'task-7',title:'核对导入清单',lifecycle:'待办',blocking:[],review:[],validity:'适用',document:'report',version:'v2',x:780,y:665});
-        if(items.some(c=>c.id==='c2'))s.tasks.find(t=>t.id==='task-3').lifecycle='待验收';
-        s.snapshotVersion++;
-      }
-    }else if(intent.type==='create-batch'){
-      const count=s.batches.length+1;
-      s.batches.push({id:`batch-${count}`,saved:false,saveLocation:'local',authorization:'pending',items:[{id:'report',name:'session-report.md',status:'待处理',attempts:0},{id:'review',name:'review.json',status:'待处理',attempts:0},{id:'unsupported',name:'archive.zip',status:'不支持',reason:'本示例不支持压缩包',attempts:0}],manifest:['session-report.md 全文（合成）','review.json 全文（合成）','requirements.md v1 有效约束（合成）','当前项目摘要与关联证据（合成）']});
-    }else if(intent.type==='save-batch'){
-      const b=s.batches.find(b=>b.id===intent.batchId);if(!b)throw Error('批次不存在');
-      b.saved=true;b.saveLocation=intent.location==='cloud'?'cloud':'local';
-      if(b.authorization==='pending')b.authorization='denied';
-      b.items.filter(i=>i.status==='待处理').forEach(i=>i.status='仅保存，未授权解析');
-    }else if(intent.type==='authorize-batch'){
-      const b=s.batches.find(b=>b.id===intent.batchId);if(!b)throw Error('批次不存在');
-      b.authorization='granted';
-      b.items.filter(i=>i.status==='待处理'||i.status==='仅保存，未授权解析').forEach(i=>{i.attempts++;i.status=i.id==='review'?'失败':'已解析';i.reason=i.id==='review'?'合成 JSON 缺少字段；可模拟修正后重试':undefined;});
-    }else if(intent.type==='retry-item'){
-      const b=s.batches.find(b=>b.id===intent.batchId),i=b?.items.find(i=>i.id===intent.id);
-      if(!i||i.status!=='失败'||b.authorization!=='granted')throw Error('只允许重试本批获授权失败项');
-      i.attempts++;i.status='已解析';i.reason=undefined;
-    }else throw Error('未知操作意图');
-    s.intentLog.push(structuredClone(intent));
-    return {message:'模拟操作已完成；仅更新隔离示例，无真实授权、审批或审计',view:await this.read()};
-  }
+function dependencyIds(s,id){const ancestors=new Set([id]);let more=true;while(more){more=false;for(const [a,b] of s.edges)if(ancestors.has(b)&&!ancestors.has(a)){ancestors.add(a);more=true;}}return s.changes.filter(c=>c.active&&ancestors.has(c.taskId)).map(c=>c.id);}
+export function recompute(s){for(const t of s.tasks){t.blocking=s.edges.filter(([,b])=>b===t.id).map(([a])=>s.tasks.find(x=>x.id===a)).filter(a=>a&&(a.lifecycle!=='已验收'||a.validity!=='适用')).map(a=>a.title+(a.lifecycle!=='已验收'?'尚未验收':'成果待复核'));if(t.lifecycle!=='待办'&&t.blocking.length){for(const reason of t.blocking){const text='前置变化待复核：'+reason;if(!t.review.includes(text))t.review.push(text);}t.validity='待复核';}t.decisions=s.candidates.filter(c=>c.taskId===t.id&&c.state==='pending').length;t.executable=['待办','进行中'].includes(t.lifecycle)&&!t.blocking.length&&t.validity==='适用';}}
+export function filteredTasks(tasks,filter){return tasks.filter(t=>filter==='全部'||filter==='可执行'&&t.executable||filter==='阻塞'&&t.blocking.length||filter==='待复核'&&t.review.length||filter==='待决策'&&t.decisions>0||t.lifecycle===filter);}
+export function relatedDocuments(s,taskId){return s.relations.filter(r=>r.taskId===taskId).map(r=>({...r,doc:s.documents.find(d=>d.id===r.document&&d.version===r.version)})).filter(r=>r.doc);}
+export function graphTasks(s,filter,context){const hits=filteredTasks(s.tasks,filter),ids=new Set(hits.map(t=>t.id)),parents=context?new Set(s.edges.filter(([,b])=>ids.has(b)).map(([a])=>a)):new Set();return {hits,nodes:s.tasks.filter(t=>ids.has(t.id)||parents.has(t.id)).map(t=>({...t,context:!ids.has(t.id)}))};}
+export function handoffView(s,taskId){const t=s.tasks.find(t=>t.id===taskId);if(!t)return null;const refs=relatedDocuments(s,t.id),usable=refs.filter(r=>r.state==='confirmed'&&r.doc.status==='available'&&(r.role==='约束'||t.validity==='适用')),baseline=s.documents.find(d=>d.id==='baseline'&&d.authority&&d.status==='available'),all=[...usable];if(baseline&&!all.some(r=>r.doc.id==='baseline'))all.unshift({doc:baseline,role:'有效主基线'});return {projectId:s.projectId,snapshotVersion:s.snapshotVersion,sourceTime:s.sourceTime,taskId:t.id,title:t.title,lifecycle:t.lifecycle,validity:t.validity,goal:t.goal,next:t.blocking.length?'先核对并完成前置验收；外部提前成果可导入，但不解除硬依赖。':t.review.length?'先核对来源与适用性。':t.lifecycle==='已验收'?'查阅成果和验收依据；新变化需复核。':t.lifecycle==='待验收'?'核对条件及版本证据，按授权检查或明确人工验收。':'按目标整理成果，可按需准备交接。',constraints:s.constraints,reusable:all.map(r=>r.doc.filename+' · '+r.doc.version+' · '+r.role),reminders:[...t.blocking.map(x=>'阻塞：'+x),...t.review.map(x=>'待复核：'+x),...refs.filter(r=>r.state==='suggested').map(r=>'候选关联：'+r.doc.filename+' '+r.version+'，尚未确认'),...refs.filter(r=>r.doc.status!=='available').map(r=>'来源受限：'+r.doc.filename+' '+r.doc.reason),...s.candidates.filter(c=>c.taskId===t.id&&c.state==='pending').map(c=>'待决定：'+c.title)],sources:[...new Set(all.concat(refs).map(r=>r.doc.source+' · '+r.doc.filename+' '+r.doc.version+(r.state==='suggested'?'（候选）':'')))]};}
+export function handoffText(s,taskId){const h=handoffView(s,taskId);return h?[`NextRelay · 示例交接 · ${h.projectId} · ${h.taskId} · 快照 v${h.snapshotVersion}`,h.sourceTime,'任务：'+h.title,'生命周期：'+h.lifecycle+'；有效性：'+h.validity,'任务目标：'+h.goal,'下一步：'+h.next,'必要有效约束',...h.constraints,'可直接复用',...(h.reusable.length?h.reusable:['暂无可直接复用的成果；请先导入并核实。']),'关键未决提醒（不作为正式约束）',...(h.reminders.length?h.reminders:['暂无相关未决提醒，仅反映已获资料。']),'来源附录',...(h.sources.length?h.sources:['当前没有可读取来源'])].join('\n'):'';}
+export function undoPreview(s,id){const change=s.changes.find(c=>c.id===id);if(!change)throw Error('变更不存在');const later=s.changes.filter(c=>c.active&&c.dependsOn.includes(id));return {change,later,blocked:later.length>0,version:s.snapshotVersion,impact:s.edges.filter(([a])=>a===change.taskId).map(([,b])=>s.tasks.find(t=>t.id===b)?.title).filter(Boolean)};}
+export class SyntheticAdapter extends WorkspaceAdapter{
+ constructor(scenario='normal',projectId='demo'){super();this.state=createFixture(scenario,projectId);}
+ async read(){return clone(this.state);}
+ async submit(intent){const before=clone(this.state);try{return await this.apply(intent);}catch(e){this.state=before;throw e;}}
+ async apply(intent){const s=this.state;let message='模拟操作已完成；仅更新当前内存示例，未写入真实项目。';const batch=()=>{const b=s.batches.find(b=>b.id===intent.batchId);if(!b)throw Error('批次不存在');return b;},version=()=>{if(intent.version!==s.snapshotVersion)throw Error('预览版本已变化，请重新预览');};
+ if(intent.type==='retry-document'){const d=s.documents.find(d=>d.id===intent.id&&d.version===intent.version);if(d?.status!=='failed')throw Error('仅载入失败可重试；不能自行授权');Object.assign(d,document(d.id,d.version,d.title,d.summary));}
+ else if(intent.type==='create-batch'){const id='batch-'+(s.batches.length+1),kind=intent.kind||'mixed';if(!['mixed','duplicate','reference'].includes(kind))throw Error('未知合成输入');s.batches.push({id,kind,saved:false,saveLocation:'local',authorization:'pending',scope:1,authorizedScope:null,items:kind==='mixed'?[{id:'report',name:'session-report.md',status:'待处理',attempts:0},{id:'review',name:'review.json',status:'待处理',attempts:0},{id:'unsupported',name:'archive.zip',status:'不支持',reason:'压缩包不在支持范围',attempts:0}]:[{id:kind,name:kind==='duplicate'?'requirements.md':'project-reference.md',status:'待处理',attempts:0}],manifest:kind==='mixed'?['report v2 全文（合成）','review.json 全文（合成）',...(s.documents.some(d=>d.id==='baseline')?['R1 有效约束（合成）']:[]),'当前项目最小任务摘要与必要证据（合成）']:[kind==='duplicate'?'R1 全文（合成）':'项目参考全文（合成）'],resultDocs:[],candidateIds:[]});message='已添加合成输入；核对本批保存选择与处理范围。';}
+ else if(intent.type==='save-batch'){const b=batch();if(!['local','cloud'].includes(intent.location))throw Error('保存选择无效');b.saved=true;b.saveLocation=intent.location;b.items.filter(i=>i.status==='待处理').forEach(i=>i.status='仅保存，未授权解析');message='模拟已保存；未授权不解析。刷新将重置内存示例。';}
+ else if(intent.type==='expand-scope'){const b=batch();b.scope++;b.manifest.push('补充参考摘要 '+b.scope+'（合成）');b.authorization='pending';message='范围已变化，需重新核对并授权。';}
+ else if(intent.type==='authorize-batch'){const b=batch();if(b.authorization==='granted'&&b.authorizedScope===b.scope)return {message:'已处理，不重复生成。',view:await this.read()};b.authorization='granted';b.authorizedScope=b.scope;for(const i of b.items.filter(i=>['待处理','仅保存，未授权解析'].includes(i.status))){i.attempts++;if(i.id==='review'){i.status='失败';i.reason='缺少 report v2 版本字段，可模拟补齐后重试。';}else{i.status='已解析';this.materialize(b,i);}}message='模拟处理结束；留在本批结果核对成功、失败与候选。';}
+ else if(intent.type==='retry-item'){const b=batch(),i=b.items.find(i=>i.id===intent.id);if(!i||i.status!=='失败'||b.authorization!=='granted'||b.authorizedScope!==b.scope)throw Error('仅重试当前范围已授权的失败项');i.attempts++;i.status='已解析';delete i.reason;this.materialize(b,i);}
+ else if(intent.type==='refresh-preview'){for(const c of [...s.candidates].filter(c=>c.state==='pending'&&c.base!==s.snapshotVersion))this.successor(c);message='已生成当前差异的后继预览，旧记录保留；请重新选择。';}
+ else if(intent.type==='resume-candidate'){const c=s.candidates.find(c=>c.id===intent.id);if(!c||c.state!=='defer')throw Error('仅暂缓项可恢复');if(c.base!==s.snapshotVersion)this.successor(c);else{c.state='pending';c.history.push('重新审查，尚未批准');}}
+ else if(intent.type==='candidate'){const items=s.candidates.filter(c=>intent.ids.includes(c.id));if(!items.length||items.length!==new Set(intent.ids).size||items.some(c=>c.state!=='pending'))throw Error('选择已失效');if(items.some(c=>c.base!==s.snapshotVersion))throw Error('预览版本已过期，请刷新并重新选择');if(!['confirm','reject','defer'].includes(intent.action))throw Error('未知动作');if(items.some(c=>c.kind!=='ordinary')&&(items.length!==1||!intent.separate))throw Error('高风险必须单独处理');if(items.some(c=>c.kind==='conflict')&&intent.action==='confirm'&&intent.resolution!=='保留当前约束')throw Error('请选择冲突处理方向');const group='submit-'+(++s.sequence);for(const c of items){c.state=intent.action;c.history.push('v'+s.snapshotVersion+'：'+({confirm:'明确确认',reject:'拒绝',defer:'暂缓'})[intent.action]);if(intent.action==='confirm')this.confirm(c,group);}if(intent.action==='confirm')s.snapshotVersion++;message='模拟'+({confirm:'确认',reject:'拒绝',defer:'暂缓'})[intent.action]+' '+items.length+' 项，可在历史或已暂缓中回访。';}
+ else if(intent.type==='undo'){version();const p=undoPreview(s,intent.id),c=p.change;if(!c.active)return {message:'已撤销，不重复修正。',view:await this.read()};if(p.blocked)throw Error('存在后续有效更新，不能安全独立撤销');const t=s.tasks.find(t=>t.id===c.taskId);if(c.before===null)s.tasks=s.tasks.filter(t=>t.id!==c.taskId);else if(t)Object.assign(t,clone(c.before));for(const r of c.relations||[]){const target=s.relations.find(x=>x.taskId===r.taskId&&x.document===r.document&&x.version===r.version);if(target)Object.assign(target,r);}c.active=false;c.revertedAt=s.snapshotVersion+1;s.changes.push({id:'change-'+(++s.sequence),type:'undo',title:'撤销：'+c.title,taskId:c.taskId,active:false,undoes:c.id,version:++s.snapshotVersion,dependsOn:[],group:'undo',basis:'明确模拟撤销；原记录与成果保留'});message='已模拟修正单次效力；保留历史及成果，重算下游。';}
+ else if(intent.type==='follow-up'){version();const p=undoPreview(s,intent.id),t=s.tasks.find(t=>t.id===p.change.taskId);if(!p.change.active||!t||p.later.length)throw Error('不能重复增加后续更新');const before=clone(t);t.review=[...t.review,'后续成果已关联，撤销前须核对'];t.validity='待复核';s.changes.push({id:'change-'+(++s.sequence),title:'后续成果适用性更新',taskId:t.id,before,active:true,dependsOn:[intent.id],version:++s.snapshotVersion,group:'follow-up',basis:'合成后续成果，保留既有来源'});}
+ else if(intent.type==='manual-accept'){version();const t=s.tasks.find(t=>t.id===intent.taskId);if(!t||t.lifecycle!=='待验收'||!intent.basis?.trim())throw Error('须针对待验收任务提供明确依据');const before=clone(t);t.lifecycle='已验收';t.validity='适用';t.review=[];t.acceptance='合成人工验收 · '+(t.document||'无关联成果')+' '+(t.version||'')+' · '+intent.basis.trim();s.changes.push({id:'change-'+(++s.sequence),title:'人工验收：'+t.title,taskId:t.id,before,active:true,dependsOn:dependencyIds(s,t.id),version:++s.snapshotVersion,group:'manual',basis:t.acceptance});}
+ else if(intent.type==='correct-version'){const d=s.documents.find(d=>d.id===intent.id&&d.version===intent.version);if(!d)throw Error('资料不存在');d.versionNote='已标记版本关系待核对；原识别依据保留，未改变任务验收。';}
+ else throw Error('未知操作意图');recompute(s);s.intentLog.push(clone(intent));return {message,view:await this.read()};
+ }
+ successor(c){const s=this.state,t=s.tasks.find(t=>t.id===c.taskId);c.state='superseded';const n={...clone(c),id:'candidate-'+(++s.sequence),predecessor:c.id,successor:null,state:'pending',base:s.snapshotVersion,current:c.effect==='submit'?(t?.lifecycle||'目标不存在'):c.current,history:['从 '+c.id+' 重新核对；旧预览保留']};c.successor=n.id;if(c.effect==='submit'&&t&&['待验收','已验收'].includes(t.lifecycle)){n.state='unnecessary';n.history.push('当前事实已满足，无须重复变更');}if(c.effect==='link'&&s.relations.some(r=>r.taskId===c.taskId&&r.document===c.document&&r.version===c.version&&r.state==='confirmed')){n.state='unnecessary';n.history.push('本版本关联已确认，无须重复变更');}s.candidates.push(n);const b=s.batches.find(b=>b.id===n.batchId);if(b)b.candidateIds.push(n.id);return n;}
+ confirm(c,group){const s=this.state;let t=s.tasks.find(t=>t.id===c.taskId),before=t?clone(t):null;const relations=[];if(c.effect==='add-task'){if(t)throw Error('目标已存在');t=task('task-7','核对导入清单','待办',null,null,780,665,'核对输入与独立来源。');s.tasks.push(t);}else if(c.effect==='submit'){if(!t||!['待办','进行中'].includes(t.lifecycle))throw Error('任务状态已变化');t.lifecycle='待验收';t.review=['缺少精确版本验收依据'];t.validity='待复核';}else if(c.effect==='link'){if(!t)throw Error('目标不存在');const r=s.relations.find(r=>r.taskId===t.id&&r.document===c.document&&r.version===c.version);if(!r)throw Error('建议关联缺失');relations.push(clone(r));r.state='confirmed';t.document=c.document;t.version=c.version;t.review=['新版本成果需复核验收依据'];t.validity='待复核';}s.changes.push({id:'change-'+(++s.sequence),candidateId:c.id,title:c.title,taskId:c.taskId,before,relations,active:true,dependsOn:dependencyIds(s,c.taskId),version:s.snapshotVersion+1,group,basis:c.basis,batchId:c.batchId});}
+ materialize(b,i){const s=this.state;if(i.id==='duplicate'){if(!s.documents.some(d=>d.id==='baseline')){const d=document('baseline','v1','需求主基线 R1','尚未确认的导入参考。','available',b.id);s.documents.push(d);b.resultDocs.push('baseline|v1');b.zeroReason='当前项目没有原版本，已作为项目参考保存；尚未指定或确认有效主基线。';}else b.zeroReason='完全重复：保留原成果和来源，不重复生成候选。';return;}if(i.id==='reference'){const id='reference-'+b.id;s.documents.push(document(id,'v1','项目通用参考','提供项目背景，不证明任务完成。','available',b.id));b.resultDocs=[id+'|v1'];b.zeroReason='通用资料保存在项目层，无需任务变更。';return;}
+ const id=i.id==='report'?'report':'review',v=id==='report'?'v2':'v1';let d=s.documents.find(d=>d.id===id&&d.version===v);const fresh=!d;if(!d){d=document(id,v,id==='report'?'导入流程工作报告':'版本匹配验证记录',id==='report'?'补充失败隔离与单项重试方案；仍待验收。':'report v2 的验证步骤记录，需核对真实性。','available',b.id);s.documents.push(d);}const key=id+'|'+v;if(!b.resultDocs.includes(key))b.resultDocs.push(key);if(!fresh){b.zeroReason='已识别同一成果版本，未重复生成候选。';return;}
+ for(const taskId of ['task-2','task-3'].filter(id=>s.tasks.some(t=>t.id===id))){s.relations.push({taskId,document:id,version:v,state:'suggested',role:id==='review'?'证据建议':'成果建议'});const c=candidate('candidate-'+(++s.sequence),'关联'+d.filename+'：'+s.tasks.find(t=>t.id===taskId).title,taskId,'尚未确认本版本关联','关联 '+d.filename+' '+v,'link','ordinary',b.id,v);c.document=id;c.base=s.snapshotVersion;c.basis=d.filename+' '+v+'「'+(id==='report'?'具体成果':'验证与限制')+'」：'+d.outcome;s.candidates.push(c);b.candidateIds.push(c.id);}
+ if(id==='report'&&s.tasks.some(t=>t.id==='task-2'&&['待办','进行中'].includes(t.lifecycle))){const c=candidate('candidate-'+(++s.sequence),'提交待验收：整理会话成果','task-2',s.tasks.find(t=>t.id==='task-2').lifecycle,'待验收','submit','ordinary',b.id,'v2');c.base=s.snapshotVersion;c.basis='report v2：方案已整理，只建议待验收。';s.candidates.push(c);b.candidateIds.push(c.id);}if(!b.candidateIds.length)b.zeroReason='当前没有可匹配任务；成果保留项目层，不自动建立正式任务。';
+ }
 }
-export function filteredTasks(tasks,filter){return tasks.filter(t=>filter==='全部'||filter==='可执行'&&t.lifecycle!=='已验收'&&!t.blocking.length||filter==='阻塞'&&t.blocking.length||filter==='待复核'&&t.review.length||t.lifecycle===filter);}
-export function handoffText(view){const h=view.handoff;return [`NextRelay · 示例交接 · ${view.projectId} · 快照 v${view.snapshotVersion}`,view.sourceTime,h.body,'必要有效约束',...h.constraints,'可直接复用',...(view.documents.length?h.reusable:['暂无可直接复用的成果；请先导入资料并核实适用性。']),'关键未决提醒（不作为正式约束）',...h.reminders,'来源附录',...(view.documents.length?h.sources:['当前场景没有可读取来源'])].join('\n');}

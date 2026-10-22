@@ -3,7 +3,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 const root=dirname(fileURLToPath(import.meta.url));
-const runtimeFiles=['index.html','src/app.js','src/style.css','src/workspace-adapter.js','src/synthetic-adapter.js','src/reader-state.js'];
+const runtimeFiles=['index.html','src/app.js','src/style.css','src/workspace-adapter.js','src/synthetic-adapter.js','src/reader-state.js','src/ux.js'];
 const files=[...runtimeFiles,'verification.html','tests/browser.js'];
 const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 export function createServer(){return http.createServer(async(req,res)=>{
