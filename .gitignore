@@ -8,3 +8,4 @@ __pycache__/
 *.sqlite3-*
 *.db
 *.db-*
+/REQUIREMENTS_BASELINE_v0.6.md
