@@ -7,7 +7,7 @@ import re
 
 from .schema import MIGRATIONS
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 7
 
 
 class SchemaError(RuntimeError):
@@ -54,9 +54,14 @@ def _catalog(connection):
 
 @lru_cache(maxsize=1)
 def _target_catalog():
+    return _version_catalog(SCHEMA_VERSION)
+
+
+@lru_cache(maxsize=4)
+def _version_catalog(target_version):
     connection = sqlite3.connect(':memory:', autocommit=True)
     try:
-        for version in range(1, SCHEMA_VERSION + 1):
+        for version in range(1, target_version + 1):
             for statement in MIGRATIONS[version]:
                 connection.execute(statement)
         return _catalog(connection)
@@ -90,6 +95,11 @@ def initialize(database: Path):
                 raise SchemaError('Refusing to initialize a nonempty unversioned database')
             if version >= 1:
                 _verify_v1(connection)
+            if 2 <= version < SCHEMA_VERSION:
+                # Rebuilding a table must not silently repair/adopt an unrecognized old constraint.
+                actual = {(kind,name):_normalize_sql(sql) for kind,name,sql in _catalog(connection)}
+                if any(actual.get((kind,name)) != _normalize_sql(sql) for kind,name,sql in _version_catalog(version)):
+                    raise SchemaError('Unexpected source schema; refusing migration')
             for target in range(version + 1, SCHEMA_VERSION + 1):
                 for statement in MIGRATIONS[target]:
                     # executescript would implicitly interfere with explicit transaction control.
@@ -98,6 +108,12 @@ def initialize(database: Path):
             verify_schema(connection)
             if connection.execute('PRAGMA foreign_key_check').fetchone() is not None:
                 raise SchemaError('Foreign key violation in database')
+            if version < 4:
+                from .auth import Principal
+                from .store import Store
+                from .lifecycle import Lifecycle
+                for project in connection.execute('SELECT * FROM projects').fetchall():
+                    Lifecycle(Store(connection,Principal(project['owner_subject']),True)).sync(project['id'],project['revision'])
 
 
 def verify_schema(connection):

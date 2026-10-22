@@ -20,6 +20,7 @@ class Settings:
     port: int = 8000
     environment: str = "development"
     auth_mode: str = "dev-token"
+    local_root: Path | None = None
 
     def __post_init__(self):
         if sys.version_info[:2] != (3, 14):
@@ -46,6 +47,20 @@ class Settings:
             sync_root = os.environ.get(key)
             if sync_root and resolved.is_relative_to(Path(sync_root).resolve()):
                 raise ConfigError("Live SQLite database must be outside OneDrive")
+        if self.local_root is not None:
+            from .localfiles import absolute
+            from .formats import ImportFailure
+            try:
+                root = absolute(self.local_root).resolve()
+            except ImportFailure:
+                raise ConfigError('Storage directory must be an absolute local path') from None
+            if root.is_relative_to(project) or any(
+                os.environ.get(k) and root.is_relative_to(Path(os.environ[k]).resolve())
+                for k in ('OneDrive','OneDriveConsumer','OneDriveCommercial')
+            ):
+                raise ConfigError('Keep originals outside project/sync directories')
+            if not root.is_dir():
+                raise ConfigError('Create the explicitly selected local storage directory first')
 
 
 def load_settings(environ=None):
@@ -64,4 +79,5 @@ def load_settings(environ=None):
         port=port,
         environment=env.get("NEXTRELAY_ENV", ""),
         auth_mode=env.get("NEXTRELAY_AUTH_MODE", ""),
+        local_root=Path(env['NEXTRELAY_LOCAL_ROOT']) if env.get('NEXTRELAY_LOCAL_ROOT') else None,
     )

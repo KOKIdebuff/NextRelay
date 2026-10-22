@@ -328,7 +328,8 @@ class HttpTests(unittest.TestCase):
         missing = self.request('/api/projects/missing-project', token=self.token)
         self.assertEqual(foreign[:2], missing[:2])
         self.assertEqual(foreign[0], 404)
-        self.assertEqual(self.request('/api/projects', token=self.token, method='POST')[0], 405)
+        # T11 enables authenticated project creation, requiring a JSON body and idempotency key.
+        self.assertEqual(self.request('/api/projects', token=self.token, method='POST')[0], 415)
 
     def test_t04_service_commit_is_visible_over_real_authenticated_http(self):
         principal=Principal('dev-http-user')

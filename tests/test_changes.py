@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 from nextrelay.auth import AccessError, Principal
 from nextrelay.changes import ChangeError, Changes, digest
-from nextrelay.db import SchemaError, connect, initialize, transaction, verify_schema
+from nextrelay.db import SCHEMA_VERSION, SchemaError, connect, initialize, transaction, verify_schema
 from nextrelay.schema import ENTITY_TABLES, RELATION_TABLES
 from nextrelay.store import TransactionAborted, unit_of_work
 
@@ -200,8 +200,10 @@ class ChangeTests(unittest.TestCase):
         self.assertEqual(self.state()['tasks'][0]['title'],'synthetic formal task')
 
     def test_unknown_operations_fields_and_untrusted_claims_do_not_grant_authority(self):
-        for op in ('dependency.add','task.accept','task.delete','task.start','document.confirm'):
+        for op in ('task.accept','task.delete','document.confirm'):
             with self.subTest(op=op),self.assertRaisesRegex(ChangeError,'unsupported_operation'):self.save(op)
+        for op in ('dependency.add','task.start'):
+            with self.subTest(op=op),self.assertRaisesRegex(ChangeError,'invalid_fields'):self.save(op)
         for extra in ({'approved':True},{'subject':'dev-t04'},{'checks_passed':True},{'preconditions':{}}):
             with self.subTest(extra=extra),self.assertRaises(ChangeError):self.save(**extra)
         with self.assertRaises(ChangeError):self.save(payload={'title':'x','approved':True})
@@ -483,7 +485,7 @@ class V2MigrationTests(unittest.TestCase):
         initialize(self.db);initialize(self.db)
         self.assertEqual(self.data(),self.before)
         with connect(self.db) as c:
-            verify_schema(c);self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0],3)
+            verify_schema(c);self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0],SCHEMA_VERSION)
             self.assertEqual(c.execute('PRAGMA integrity_check').fetchone()[0],'ok')
             self.assertEqual(c.execute('PRAGMA foreign_key_check').fetchall(),[])
         with unit_of_work(self.db,Principal('dev-original')) as s:

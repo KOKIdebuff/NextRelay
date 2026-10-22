@@ -3,7 +3,7 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 const root=dirname(fileURLToPath(import.meta.url));
-const runtimeFiles=['index.html','src/app.js','src/style.css','src/workspace-adapter.js','src/synthetic-adapter.js','src/reader-state.js','src/ux.js'];
+const runtimeFiles=['index.html','src/app.js','src/style.css','src/workspace-adapter.js','src/synthetic-adapter.js','src/reader-state.js','src/ux.js','src/local-adapter.js','src/local-ui.js'];
 const files=[...runtimeFiles,'verification.html','tests/browser.js'];
 const mime={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 export function createServer(){return http.createServer(async(req,res)=>{
@@ -15,7 +15,7 @@ export function createServer(){return http.createServer(async(req,res)=>{
 if(process.argv[2]==='build'){
   const out=resolve(root,'dist');await mkdir(out,{recursive:true});
   for(const f of runtimeFiles){await mkdir(dirname(resolve(out,f)),{recursive:true});await writeFile(resolve(out,f),await readFile(resolve(root,f)));}
-  console.log(`Built ${runtimeFiles.length} static runtime files to frontend/dist (no business API).`);
+  console.log(`Built ${runtimeFiles.length} static runtime files to frontend/dist (local API runtime + separate synthetic preview).`);
 }else if(process.argv[2]==='serve'){
   const args=process.argv.slice(3);let port=4173;
   if(args.length){if(args.length!==2||args[0]!=='--port'||!/^\d+$/.test(args[1]))throw Error('Usage: npm run dev -- --port 4173');port=Number(args[1]);if(port<1024||port>65535)throw Error('Invalid port');}

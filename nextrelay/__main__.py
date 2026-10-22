@@ -37,7 +37,7 @@ def main():
             with make_server(
                 settings.host, settings.port, application, handler_class=QuietHandler
             ) as server:
-                print(f"NextRelay T04: http://{settings.host}:{settings.port} (synthetic development only)", flush=True)
+                print(f"NextRelay T11 local API: http://{settings.host}:{settings.port} (synthetic development only)", flush=True)
                 server.serve_forever()
     except (ConfigError, SchemaError) as error:
         parser.exit(2, f"{error}\n")

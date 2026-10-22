@@ -1,6 +1,7 @@
 import { SyntheticAdapter, scenarios, filteredTasks, handoffText } from './synthetic-adapter.js';
 import { ReaderRecords, readerKey, snapMode } from './reader-state.js';
 import { installUX } from './ux.js';
+import { connectLocal, installLocalUI } from './local-ui.js';
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 // Local SVG pixel assets derived from docs/ui/reference; decorative only.
@@ -32,7 +33,10 @@ const records=new ReaderRecords();
 const ui={page:'overview',project:'demo',scenario:'normal',task:null,filter:'全部',view:'list',mode:'half',doc:null,version:null,listTop:0,graph:{x:0,y:0,z:.8,initialized:false},selected:new Set(),locationChoices:{}};
 const projects=new Map();
 const root=$('#app');
-let adapter=new SyntheticAdapter(),data=await adapter.read(),generation=0,readerObserver,noticeTimer;
+const mode=new URLSearchParams(location.search).get('mode')||document.querySelector('meta[name="nextrelay-mode"]')?.content||'synthetic';
+const connected=mode==='local'?await connectLocal(root):null;
+let adapter=connected?.adapter||new SyntheticAdapter(),data=connected?.data||await adapter.read(),generation=0,readerObserver,noticeTimer,localUX;
+if(connected)ui.project=data.projectId;
 function toast(message){clearTimeout(noticeTimer);$('#notice').textContent=message;noticeTimer=setTimeout(()=>$('#notice').textContent='',6500);}
 function badge(text,kind=''){const tone=kind||({'已验收':'green','已确认':'green','适用':'green','进行中':'blue','待验收':'amber','待复核':'amber','阻塞':'red'}[text]||'');return `<span class="badge ${tone}">${esc(text)}</span>`;}
 function taskFilename(t){return data.documents.find(d=>d.id===t.document&&d.version===t.version)?.filename||`${t.document} · 引用未载入`;}
@@ -46,7 +50,7 @@ function shell(){
   $('#project').value=ui.project;$('#scenario').value=ui.scenario;
   $('#project').onchange=e=>switchProject(e.target.value);
   $('#scenario').onchange=e=>changeScenario(e.target.value);
-  renderPage();
+  renderPage();localUX?.decorate();
 }
 function header(title,subtitle,actions=''){return `<header class="page-header"><div class="title-icon">${icon(ui.page==='imports'?'folder':'file')}</div><div><p class="eyebrow">NEXTRELAY / ${esc(names[ui.page])}</p><h1>${title}</h1><p>${subtitle}</p></div><div class="header-actions">${actions}</div></header>`;}
 function renderPage(){
@@ -154,4 +158,8 @@ root.onclick=async e=>{
 };
 const ux=installUX({ui,root,$,esc,icon,badge,button,blank,life,reminder,records,readerKey,saveReading,restoreReading,shell,header,renderDocument,applyMode,wireHandle,wireGraph,centerTask,transformGraph,toast,getData:()=>data,getAdapter:()=>adapter,getGeneration:()=>generation,setData:value=>data=value,renderTasks,renderTaskArea,mutate,switchProject,changeScenario,reset});
 renderOverview=ux.renderOverview;renderTasks=ux.renderTasks;renderTaskArea=ux.renderTaskArea;renderDocument=ux.renderDocument;renderImports=ux.renderImports;renderReview=ux.renderReview;renderHandoff=ux.renderHandoff;mutate=ux.mutate;switchProject=ux.switchProject;changeScenario=ux.changeScenario;reset=ux.reset;root.onclick=ux.onclick;
+if(mode==='local'){
+  localUX=installLocalUI({ui,root,$,esc,button,header,shell,toast,getData:()=>data,getAdapter:()=>adapter,setData:v=>data=v},ux);
+  ({renderOverview,renderTasks,renderTaskArea,renderImports,renderReview,renderHandoff}=localUX);root.onclick=localUX.onclick;
+}
 shell();

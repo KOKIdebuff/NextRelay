@@ -60,14 +60,15 @@ class Changes:
 
     def latest_task(self, project, target):
         self.s._get(project, 'tasks', target)
-        row = self.c.execute('SELECT * FROM formal_task_states WHERE project_id=? AND task_id=? ORDER BY revision DESC LIMIT 1',
-                             (project,target)).fetchone()
+        from .reversals import Reversals
+        row = next((r for r in Reversals(self.s).tasks(project) if r['task_id'] == target), None)
         if row is None:
             raise ChangeError('task_not_formal')
         return dict(row)
 
     def baseline(self, project):
-        row = self.c.execute('SELECT * FROM baseline_history WHERE project_id=? ORDER BY revision DESC LIMIT 1', (project,)).fetchone()
+        from .reversals import Reversals
+        row = max(Reversals(self.s).active_rows(project, 'baseline_history'), key=lambda r: r['revision'], default=None)
         return dict(row) if row else None
 
     def active(self, project, candidate):
@@ -111,15 +112,22 @@ class Changes:
         elif op == 'baseline.set':
             self.s._get(project,'artifacts',target)
             result['baseline'] = self.baseline(project)
+        elif op == 'change.revoke':
+            from .reversals import Reversals
+            result['reversal'] = Reversals(self.s).validate(project,spec)
+        else:
+            from .lifecycle import Lifecycle
+            result['t05'] = Lifecycle(self.s).preconditions(project,spec)
         if version is not None:
             result['version'] = self.s._get(project,'artifact_versions',version)
             if op == 'baseline.set' and result['version']['artifact_id'] != target:
                 raise ChangeError('wrong_artifact_version')
             result['version_sources'] = [dict(r) for r in self.c.execute(
                 'SELECT * FROM version_sources WHERE project_id=? AND version_id=? ORDER BY source_id',(project,version))]
-        if op == 'version.confirm' and self.c.execute('SELECT 1 FROM confirmed_version_links WHERE project_id=? AND task_id=? AND version_id=?',
-                                                     (project,target,version)).fetchone():
-            raise ChangeError('version_already_confirmed')
+        if op == 'version.confirm':
+            from .reversals import Reversals
+            if any(r['task_id']==target and r['version_id']==version for r in Reversals(self.s).active_rows(project,'confirmed_version_links')):
+                raise ChangeError('version_already_confirmed')
         if op == 'baseline.set' and result['baseline'] and result['baseline']['version_id'] == version:
             raise ChangeError('baseline_already_current')
         for source in spec['source_ids']:
@@ -127,7 +135,7 @@ class Changes:
             result.setdefault('attributions',[]).append(self.s.attribution(project,source))
         for evidence in spec['evidence_ids']:
             e = self.s._get(project,'evidence',evidence)
-            expected_task = target if op == 'version.confirm' else None
+            expected_task = target if op not in ('baseline.set','task.create') else None
             if version is None or e['version_id'] != version or e['task_id'] != expected_task:
                 raise ChangeError('inapplicable_evidence')
             if expected_task and e['conditions_version'] != self.s._get(project,'tasks',target)['conditions_version']:
@@ -143,7 +151,8 @@ class Changes:
         if p['revision'] != base:
             raise ChangeError('revision_conflict')
         op = request['operation']
-        if op not in ('task.create','task.update','version.confirm','baseline.set'):
+        from .schema_t05 import OPERATIONS
+        if op not in OPERATIONS + ('change.revoke',):
             raise ChangeError('unsupported_operation')
         payload = request['payload']
         if op == 'task.create':
@@ -159,10 +168,22 @@ class Changes:
                 raise ChangeError('unsupported_task_update')
             payload = {k:content(v,empty=k=='goal') for k,v in payload.items()}
             target = content(request.get('target_id'))
-        else:
+        elif op in ('version.confirm','baseline.set'):
             exact(payload, ())
             target = content(request.get('target_id'))
             content(request.get('target_version_id'))
+        elif op == 'change.revoke':
+            exact(payload, ('preview_id',))
+            content(payload['preview_id'])
+            target = content(request.get('target_id'))
+            if 'target_version_id' in request or request.get('source_ids') or request.get('evidence_ids'):
+                raise ChangeError('unexpected_reversal_input')
+        else:
+            from .lifecycle import Lifecycle
+            payload = Lifecycle(self.s).normalize(op,payload)
+            target = content(request.get('target_id'))
+            if op in ('task.submit','check.authorize','acceptance.human','acceptance.auto'):
+                content(request.get('target_version_id'))
         version = request.get('target_version_id')
         source_ids, evidence_ids = [], []
         for key, dest in (('source_ids',source_ids),('evidence_ids',evidence_ids)):
@@ -177,7 +198,7 @@ class Changes:
         if not isinstance(conflicts,list) or len(conflicts)>100:
             raise ChangeError('invalid_conflicts')
         conflicts = [content(v) for v in conflicts]
-        risk = 'conflict' if conflicts or risk=='conflict' else ('high' if op=='baseline.set' else risk)
+        risk = 'conflict' if conflicts or risk=='conflict' else ('high' if op in ('baseline.set','check.authorize','acceptance.human','acceptance.auto','recheck.resolve','change.revoke') else risk)
         impact = content(request.get('impact',''),empty=True)
         if not impact.strip():
             impact = {
@@ -185,7 +206,7 @@ class Changes:
                 'task.update': 'Append a formal title/goal snapshot and a pending recheck; preserve history.',
                 'version.confirm': 'Confirm this exact task/version relation; no acceptance or authority inheritance.',
                 'baseline.set': 'Switch the single requirements baseline to this exact version and record a pending recheck; readiness is not evaluated.',
-            }[op]
+            }.get(op,'Apply this exact T05 operation; retain lifecycle, evidence and authorization history.')
         spec = dict(operation=op,target_id=target,target_version_id=version,payload=payload,
                     base_revision=base,source_ids=source_ids,evidence_ids=evidence_ids,
                     risk=risk,conflicts=conflicts,impact=impact)
@@ -235,6 +256,8 @@ class Changes:
             if candidate['fingerprint'] != item['fingerprint']:
                 raise ChangeError('candidate_content_mismatch')
             if decision == 'approve':
+                if candidate['operation']=='acceptance.auto':
+                    raise ChangeError('use_pre_authorized_acceptance_service')
                 self.validate(project,candidate)
                 if candidate['risk'] != 'ordinary' and mode != 'explicit':
                     raise ChangeError('explicit_authorization_required')
@@ -310,13 +333,16 @@ class Changes:
             self.insert_fixed(project,'effective_changes',eid,dict(candidate_id=candidate['candidate_id']))
             self.insert_fixed(project,'applied_changes',aid,dict(effective_change_id=eid,candidate_id=candidate['candidate_id'],
                 review_id=review['id'],commit_id=commit['id'],effect_json=canonical(candidate['spec'])))
-            self.apply(project,candidate['spec'],revision,aid)
+            self.apply(project,candidate['spec'],revision,aid,review)
         changed = self.c.execute('UPDATE projects SET revision=? WHERE id=? AND revision=?', (revision,project,base)).rowcount
         if changed != 1:
             raise ChangeError('revision_conflict')
+        from .lifecycle import Lifecycle
+        Lifecycle(self.s).sync(project,revision)
         return result
 
     def insert_fixed(self, project, table, identity, values):
+        self.s._projection_cache.clear()
         # Fixed table/columns from trusted code only; caller data are SQL parameters.
         from datetime import datetime, timezone
         values = dict(id=identity,project_id=project,created_at=datetime.now(timezone.utc).isoformat(),created_by=self.s._principal.subject,**values)
@@ -335,7 +361,7 @@ class Changes:
             raise ChangeError('invalid_internal_fields')
         self.c.execute(sql,tuple(values[k] for k in columns))
 
-    def apply(self, project, spec, revision, change_id):
+    def apply(self, project, spec, revision, change_id, review=None):
         op,target,version = spec['operation'],spec['target_id'],spec['target_version_id']
         if op == 'task.create':
             values = spec['payload']
@@ -345,7 +371,7 @@ class Changes:
             old = spec['preconditions']['task']
             values = {k:old[k] for k in ('title','goal','completion_conditions')}
             values.update(spec['payload'])
-            self.s._insert(project,'formal_task_states',task_id=target,revision=revision,change_id=change_id,**values)
+            self.s._insert(project,'formal_task_states',task_id=target,revision=revision,change_id=change_id,lifecycle=old['lifecycle'],**values)
         elif op == 'version.confirm':
             self.s.link_version_task(project,version,target)
             self.s._insert(project,'confirmed_version_links',task_id=target,version_id=version,change_id=change_id)
@@ -353,17 +379,38 @@ class Changes:
             old = spec['preconditions']['baseline']
             self.s._insert(project,'baseline_history',version_id=version,previous_version_id=old['version_id'] if old else None,
                            revision=revision,change_id=change_id)
+        elif op == 'change.revoke':
+            from .reversals import Reversals
+            Reversals(self.s).apply(project,spec,revision,change_id)
         else:
-            raise ChangeError('unsupported_operation')
+            from .lifecycle import Lifecycle
+            Lifecycle(self.s).apply(project,spec,revision,change_id,review)
         if op in ('baseline.set','task.update'):
             self.s._insert(project,'recheck_requests',revision=revision,change_id=change_id,
                            reason='baseline-changed' if op=='baseline.set' else 'task-content-changed')
+        elif op in ('version.confirm','dependency.add','recheck.resolve'):
+            from .lifecycle import Lifecycle
+            Lifecycle(self.s).propagate(project,spec,revision,change_id)
 
     def state(self, project):
         p = self.s._project(project)
-        tasks = [dict(r) for r in self.c.execute('''SELECT s.* FROM formal_task_states s WHERE s.project_id=?
-            AND NOT EXISTS (SELECT 1 FROM formal_task_states n WHERE n.project_id=s.project_id AND n.task_id=s.task_id AND n.revision>s.revision)
-            ORDER BY s.task_id''',(project,))]
-        return dict(project=p,tasks=tasks,confirmed_versions=self.rows(project,'confirmed_version_links'),
-                    baseline=self.baseline(project),pending_rechecks=self.rows(project,'recheck_requests'),
-                    readiness='not-evaluated',acceptance='not-implemented',derived_state='not-computed')
+        from .reversals import Reversals
+        effects = Reversals(self.s)
+        tasks = effects.tasks(project)
+        row = self.c.execute('SELECT state_json FROM derived_snapshots WHERE project_id=? AND revision=?',(project,p['revision'])).fetchone()
+        derived = json.loads(row[0]) if row else None
+        processed = {r['request_id'] for r in self.rows(project,'recheck_processing')}
+        return dict(project=p,tasks=tasks,confirmed_versions=effects.active_rows(project,'confirmed_version_links'),
+                    baseline=self.baseline(project),pending_rechecks=[r for r in self.rows(project,'recheck_requests') if r['id'] not in processed],
+                    readiness='not-evaluated',acceptance='exact-version-dual-path',derived_state='current' if derived else 'not-computed',
+                    derived=derived,acceptances=self.rows(project,'acceptances'),events=sorted(self.rows(project,'task_events'),key=lambda e:(e['revision'],e['id'])),
+                    check_executions=self.rows(project,'check_executions'),authorizations=self.rows(project,'check_authorizations'),
+                    review_reasons=self.rows(project,'review_reasons'),review_resolutions=self.rows(project,'review_resolutions'),
+                    current_authorizations=effects.active_rows(project,'check_authorizations'),
+                    effective_acceptances=effects.acceptances(project),
+                    current_review_resolutions=effects.active_rows(project,'review_resolutions'),
+                    current_dependencies=[r for r in effects.active_rows(project,'dependencies') if r['phase']=='formal'],
+                    historical_confirmed_versions=self.rows(project,'confirmed_version_links'),
+                    corrections=self.rows(project,'effect_corrections'),
+                    change_effects=[dict(change_id=a['id'],effective_change_id=a['effective_change_id'],
+                                         active=a['id'] not in effects.revoked(project)) for a in effects.changes(project)])

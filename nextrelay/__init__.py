@@ -1,2 +1,2 @@
-"""NextRelay T04 candidate review and atomic formal commits."""
-__version__ = "0.3.0"
+"""NextRelay local synthetic lifecycle, verification and dependency services."""
+__version__ = "0.7.0"

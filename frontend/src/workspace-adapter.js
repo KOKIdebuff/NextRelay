@@ -1,7 +1,7 @@
 /**
  * Presentation/intent port, not an HTTP API contract.
- * A future T11 adapter must implement this boundary with real permissions,
- * version checks and server results. This prototype only supplies SyntheticAdapter.
+ * LocalAdapter uses authenticated same-origin business services; SyntheticAdapter
+ * remains an explicitly separate in-memory prototype. Neither may fall back to the other.
  */
 export class WorkspaceAdapter {
   async read() { throw new Error('请提供展示适配器'); }

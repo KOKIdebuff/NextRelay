@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "node tools.mjs serve",
     "build": "node tools.mjs build",
-    "check": "node --check src/app.js && node --check src/ux.js && node --check src/workspace-adapter.js && node --check src/synthetic-adapter.js && node --check src/reader-state.js && node --check tests/browser.js && node --check tools.mjs",
+    "check": "node --check src/app.js && node --check src/ux.js && node --check src/workspace-adapter.js && node --check src/synthetic-adapter.js && node --check src/reader-state.js && node --check src/local-adapter.js && node --check src/local-ui.js && node --check tests/local-adapter.test.mjs && node --check tests/real-browser.mjs && node --check tests/browser.js && node --check tools.mjs",
     "test": "node --test tests/*.test.mjs"
   }
 }

@@ -160,4 +160,14 @@ from .schema_t04 import migration, T04_TABLES
 V3 = migration(record, ref)
 
 ENTITY_TABLES += T04_TABLES
-MIGRATIONS = {1: V1, 2: V2, 3: V3}
+from .schema_t05 import migration as t05_migration, T05_TABLES
+V4 = t05_migration(record, ref, V2, V3)
+ENTITY_TABLES += T05_TABLES
+from .schema_t06 import migration as t06_migration, T06_TABLES
+V5 = t06_migration(record, ref, V2, V3, V4)
+ENTITY_TABLES += T06_TABLES
+from .schema_t07 import migration as t07_migration, T07_TABLES
+V6 = t07_migration(record, ref)
+ENTITY_TABLES += T07_TABLES
+from .schema_t11 import V7
+MIGRATIONS = {1: V1, 2: V2, 3: V3, 4: V4, 5: V5, 6: V6, 7: V7}

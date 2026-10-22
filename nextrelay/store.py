@@ -71,6 +71,7 @@ class Store:
         self._principal = principal
         self._write = write
         self._failed = False
+        self._projection_cache = {}
 
     def _project(self, project_id):
         row = self._connection.execute(
@@ -92,7 +93,15 @@ class Store:
             raise AccessError(404, 'object_not_found')
         return dict(row)
 
+    def _require_version(self, project_id, version_id):
+        """Existence/ownership without loading an untrusted, potentially oversized body."""
+        self._project(project_id)
+        if self._connection.execute('SELECT 1 FROM artifact_versions WHERE project_id=? AND id=?',
+                                    (project_id,version_id)).fetchone() is None:
+            raise AccessError(404,'object_not_found')
+
     def _insert(self, project_id, table, **values):
+        self._projection_cache.clear()
         self._project(project_id)
         if table not in ENTITY_TABLES:
             raise ValueError('Unknown entity table')
@@ -107,6 +116,7 @@ class Store:
         return self._get(project_id, table, values['id'])
 
     def _link(self, project_id, table, **values):
+        self._projection_cache.clear()
         self._project(project_id)
         if table not in RELATION_TABLES:
             raise ValueError('Unknown relation kind')
@@ -131,6 +141,8 @@ class Store:
             'INSERT INTO projects(id, owner_subject, title, created_at) VALUES (?, ?, ?, ?)',
             (project_id, self._principal.subject, text_value(title, 'title'), datetime.now(timezone.utc).isoformat()),
         )
+        from .lifecycle import Lifecycle
+        Lifecycle(self).sync(project_id,0)
         return self._project(project_id)
 
     @operation()
@@ -277,7 +289,7 @@ class Store:
     @operation(write=True)
     def record_evidence(self, project_id, version_id, *, task_id=None, source_id=None, kind='pending',
                         mechanism, subject, result, configuration_version, conditions_version=None):
-        self._get(project_id, 'artifact_versions', version_id)
+        self._require_version(project_id, version_id)
         if source_id is not None:
             self._get(project_id, 'sources', source_id)
         if task_id is not None:
@@ -359,3 +371,18 @@ class Store:
         if result is None:
             return None
         return json.loads(result['result_json'])
+
+    @operation(write=True)
+    def run_check(self, project_id, task_id, version_id, configuration):
+        from .lifecycle import Lifecycle
+        return Lifecycle(self).run(project_id,task_id,version_id,configuration)
+
+    @operation(write=True)
+    def accept_pre_authorized(self, project_id, request):
+        from .lifecycle import Lifecycle
+        return Lifecycle(self).auto_accept(project_id,request)
+
+    @operation(write=True)
+    def preview_reversal(self, project_id, original_change_id):
+        from .reversals import Reversals
+        return Reversals(self).preview(project_id, original_change_id)
