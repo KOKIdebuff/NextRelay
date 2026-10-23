@@ -170,4 +170,7 @@ from .schema_t07 import migration as t07_migration, T07_TABLES
 V6 = t07_migration(record, ref)
 ENTITY_TABLES += T07_TABLES
 from .schema_t11 import V7
-MIGRATIONS = {1: V1, 2: V2, 3: V3, 4: V4, 5: V5, 6: V6, 7: V7}
+from .schema_t08 import migration as t08_migration, T08_TABLES
+V8 = t08_migration(record, ref)
+ENTITY_TABLES += T08_TABLES
+MIGRATIONS = {1: V1, 2: V2, 3: V3, 4: V4, 5: V5, 6: V6, 7: V7, 8: V8}

@@ -39,9 +39,9 @@ export class LocalAdapter extends WorkspaceAdapter {
     const pid=this.projectId;
     const [raw,imports]=await Promise.all([this.request(this.path('snapshot')),caps.local_storage.directory?this.request(this.path('imports')):Promise.resolve({batches:[]})]);
     const documents=await Promise.all(raw.versions.map(async v=>{
-      const id=v.artifact_id,a=raw.artifacts.find(a=>a.id===id);
+      const id=v.native_relation?.family_id||v.artifact_id,a=raw.artifacts.find(a=>a.id===id);
       if(!this.bodyCache.has(v.id)){const full=await this.request(`/api/projects/${pid}/versions/${v.id}`);this.bodyCache.set(v.id,full.version.content);}
-      return {id,version:v.id,ordinal:v.ordinal,title:a.title,filename:a.title,status:'available',summary:'精确成果版本 · '+v.content_sha256,outcome:v.revision_reason,pending:[],body:[{id:'body',heading:'版本正文',text:this.bodyCache.get(v.id)}],source:v.provenance.sources.map(s=>s.reference||s.id).join('；')||'来源待关联',evidence:raw.evidence.filter(e=>e.version_id===v.id).map(pretty),versions:raw.versions.filter(r=>r.artifact_id===id).map(r=>`v${r.ordinal} · ${r.id} · ${r.content_sha256}`),authority:raw.formal.baseline?.version_id===v.id,provenance:v.provenance};
+      return {id,version:v.id,ordinal:v.ordinal,title:a.title,filename:a.title,status:'available',summary:'精确成果版本 · '+v.content_sha256,outcome:v.revision_reason,pending:[],body:[{id:'body',heading:'版本正文',text:this.bodyCache.get(v.id)}],source:v.provenance.sources.map(s=>s.reference||s.id).join('；')||'来源待关联',evidence:raw.evidence.filter(e=>e.version_id===v.id).map(pretty),versions:raw.versions.filter(r=>(r.native_relation?.family_id||r.artifact_id)===id).map(r=>`v${r.ordinal} · ${r.id} · ${r.content_sha256}`),authority:raw.formal.baseline?.version_id===v.id,provenance:v.provenance};
     }));
     const batches=await Promise.all(imports.batches.map(async b=>{
       const items=await Promise.all(b.items.map(async item=>{
@@ -50,7 +50,7 @@ export class LocalAdapter extends WorkspaceAdapter {
         if(latest?.parse_status==='parsed'){
           const parsed=await this.request(`/api/projects/${pid}/items/${item.id}/parsed`);
           const text=parsed.text??parsed.protocol?.documents.map(d=>`${d.title}\n${d.text}`).join('\n\n')??pretty(parsed);
-          documents.push({id:'import-'+item.id,version:latest.result_sha256,title:input.name,filename:input.name,status:'available',summary:'本地格式解析；未进行 T08 语义提取',outcome:'原件已保存',pending:['任务／成果匹配尚未接通'],body:[{id:'body',heading:'完整格式正文',text}],source:latest.source_id+' · '+input.fingerprint,evidence:[],versions:item.attempts.map(a=>`尝试 ${a.ordinal} · ${a.parse_status} · ${a.result_sha256||a.reason}`),batchId:b.id,importItem:item.id});
+          documents.push({id:'import-'+item.id,version:latest.result_sha256,title:input.name,filename:input.name,status:'available',summary:item.semantic_status==='extracted'?'已原生提取；归属与候选见下方':'本地格式解析；可执行原生提取',outcome:'原件已保存',pending:[],body:[{id:'body',heading:'完整格式正文',text}],source:latest.source_id+' · '+input.fingerprint,evidence:[],versions:item.attempts.map(a=>`尝试 ${a.ordinal} · ${a.parse_status} · ${a.result_sha256||a.reason}`),batchId:b.id,importItem:item.id});
         }
         return {id:item.id,name:input.name,status,reason:latest?.reason||(!latest?'pending':''),attempts:item.attempts.length,raw:item};
       }));
@@ -62,11 +62,11 @@ export class LocalAdapter extends WorkspaceAdapter {
       const d=derived.find(d=>d.task_id===t.task_id);
       if(!d)throw Error('服务端状态缺少派生快照，不能计算替代状态');
       const version=raw.versions.find(v=>v.id===d.version_id);
-      return {id:t.task_id,title:t.title,goal:t.goal,conditions:[t.completion_conditions],lifecycle:life[d.lifecycle]||d.lifecycle,validity:validity[d.validity]||d.validity,blocking:d.blockers.map(b=>`${b.task_id} · ${b.reason}`),review:d.review_reasons.map(r=>`${r.id} · ${r.reason}`),executable:d.executable,decisions:candidates.filter(c=>c.taskId===t.task_id&&['pending','approved','defer'].includes(c.state)).length,document:version?.artifact_id||null,version:d.version_id||null,x:40+(i%3)*350,y:40+Math.floor(i/3)*220,acceptance:d.current_acceptance_ids.join('；'),raw:t,derived:d};
+      return {id:t.task_id,title:t.title,goal:t.goal,conditions:[t.completion_conditions],lifecycle:life[d.lifecycle]||d.lifecycle,validity:validity[d.validity]||d.validity,blocking:d.blockers.map(b=>`${b.task_id} · ${b.reason}`),review:d.review_reasons.map(r=>`${r.id} · ${r.reason}`),executable:d.executable,decisions:candidates.filter(c=>c.taskId===t.task_id&&['pending','approved','defer'].includes(c.state)).length,document:version?(version.native_relation?.family_id||version.artifact_id):null,version:d.version_id||null,x:40+(i%3)*350,y:40+Math.floor(i/3)*220,acceptance:d.current_acceptance_ids.join('；'),raw:t,derived:d};
     });
     const changes=raw.history.applied_changes.map(a=>{const spec=JSON.parse(a.effect_json);return {id:a.id,title:spec.operation,taskId:spec.target_id,version:raw.history.change_commits.find(c=>c.id===a.commit_id)?.revision,active:f.change_effects.find(e=>e.change_id===a.id)?.active,dependsOn:[],group:a.commit_id,basis:raw.reviews.find(r=>r.id===a.review_id)?.basis||'',raw:a};});
     this.storage?.setItem('nextrelay.project',pid);
-    this.view={mode:'local',projectId:pid,title:f.project.title,goal:'真实本地业务 API · T08 与 Context Sync 尚未接通',snapshotVersion:f.project.revision,sourceTime:'读取于 '+new Date().toLocaleString('zh-CN')+'；来源时间见记录',projects:this.projects,capabilities:caps,tasks,edges:f.current_dependencies.map(d=>[d.predecessor_id,d.successor_id]),documents,relations:f.confirmed_versions.map(r=>({taskId:r.task_id,document:raw.versions.find(v=>v.id===r.version_id)?.artifact_id,version:r.version_id,state:'confirmed'})),candidates,batches,changes,constraints:[],formal:f,raw};
+    this.view={mode:'local',projectId:pid,title:f.project.title,goal:'真实本地业务 API · 原生提取与独立审查 · Context Sync 尚未接通',snapshotVersion:f.project.revision,sourceTime:'读取于 '+new Date().toLocaleString('zh-CN')+'；来源时间见记录',projects:this.projects,capabilities:caps,tasks,edges:f.current_dependencies.map(d=>[d.predecessor_id,d.successor_id]),documents,relations:f.confirmed_versions.map(r=>({taskId:r.task_id,document:(raw.versions.find(v=>v.id===r.version_id)?.native_relation?.family_id||raw.versions.find(v=>v.id===r.version_id)?.artifact_id),version:r.version_id,state:'confirmed'})),candidates,batches,changes,constraints:[],formal:f,raw};
     return this.view;
   }
   async post(resource,body){
@@ -106,6 +106,16 @@ export class LocalAdapter extends WorkspaceAdapter {
       await this.post(`items/${intent.id}/retry`,intent.file?{replacement:await encodeFile(intent.file)}:{use_original:true});message='单项重试请求已确认，请查看该项保存与解析结果。';
     }else if(intent.type==='process-batch'){
       await this.post(`imports/${intent.id}/process`,{});message='已恢复尚未处理项；请查看逐项结果。';
+    }else if(intent.type==='extract-item'){
+      await this.post(`items/${intent.id}/extract`,{base_revision:this.view.snapshotVersion});message='原生提取已保存；候选尚未审查或正式提交。';
+    }else if(intent.type==='native-correct'||intent.type==='native-rematch'||intent.type==='native-candidates'){
+      const doc=this.view.raw.native.runs.flatMap(r=>r.documents).find(d=>d.id===intent.id);
+      if(!doc)throw Error('提取结果不存在，请刷新');
+      await this.post(`native/documents/${intent.id}/${intent.type.slice(7)}`,{base_revision:this.view.snapshotVersion,expected_decision_id:doc.decision.id,...(intent.type==='native-correct'?{matches:intent.matches,basis:intent.basis}:{})});message='原生归属／候选记录已保存；正式状态须独立审查提交。';
+    }else if(intent.type==='native-version-correct'){
+      const doc=this.view.raw.native.runs.flatMap(r=>r.documents).find(d=>d.id===intent.id);
+      if(!doc?.relation)throw Error('此版本没有原生版本关系');
+      await this.post(`native/versions/${doc.version_id}/correct`,{base_revision:this.view.snapshotVersion,expected_relation_id:doc.relation.id,...intent.request});message='版本关系纠正已追加保存；旧版本正文、权威及验收保持独立。';
     }else if(intent.type==='run-check'){
       await this.post('checks',{task_id:intent.taskId,version_id:intent.versionId,configuration:intent.configuration});message='本地内置检查已执行；查看服务端真实结果。检查通过仍不等于验收。';
     }else if(intent.type==='auto-accept'){

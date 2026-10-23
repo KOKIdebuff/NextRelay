@@ -37,7 +37,10 @@ class T06MigrationTests(unittest.TestCase):
                 store._project(project)
                 return []
             return records(store,project,table)
-        with patch('nextrelay.db.SCHEMA_VERSION',4),patch('nextrelay.db._target_catalog',lambda:_version_catalog(4)),patch.object(Store,'records',t05_records):
+        # Native extraction did not exist in v4. Disable only its new advisory
+        # lookup while constructing the real historical fixture, never during
+        # migration or the post-upgrade assertions below.
+        with patch('nextrelay.db.SCHEMA_VERSION',4),patch('nextrelay.db._target_catalog',lambda:_version_catalog(4)),patch.object(Store,'records',t05_records),patch('nextrelay.native.Native.requirements',return_value={'conflicts':[]}):
             initialize(self.db)
             with self.j.work() as s:
                 self.j.p=s.create_project('Synthetic complete T05 v4')['id'];self.j.q=s.create_project('Other synthetic')['id']

@@ -7,7 +7,7 @@ import re
 
 from .schema import MIGRATIONS
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class SchemaError(RuntimeError):

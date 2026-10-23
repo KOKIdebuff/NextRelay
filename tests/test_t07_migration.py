@@ -21,7 +21,9 @@ class T07MigrationTests(unittest.TestCase):
         self.root=Path(self.temp.name);self.db=self.root/'complete-v5.sqlite3'
         self.j=ReversalJourney();self.j.db=self.db;self.j.owner=Principal('dev-t07-migration')
         # Exact original v5 DDL and real T06 service; no version-tag spoofing.
-        with patch('nextrelay.db.SCHEMA_VERSION',5),patch('nextrelay.db._target_catalog',lambda:_version_catalog(5)):
+        # Only the old-fixture construction has no T08 advisory data. The real
+        # migration, old rows/guards and post-upgrade behavior remain unpatched.
+        with patch('nextrelay.db.SCHEMA_VERSION',5),patch('nextrelay.db._target_catalog',lambda:_version_catalog(5)),patch('nextrelay.native.Native.requirements',return_value={'conflicts':[]}):
             initialize(self.db)
             with self.j.work() as s:
                 self.j.p=s.create_project('Complete synthetic T06')['id'];self.j.q=s.create_project('Other')['id']

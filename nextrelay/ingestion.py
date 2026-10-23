@@ -480,9 +480,11 @@ class ImportService:
             plans=[dict(r) for r in s._connection.execute('''SELECT p.id,p.input_id,p.request_key,p.created_at,r.attempt_id FROM ingest_retry_plans p
                 LEFT JOIN ingest_requests r ON r.project_id=p.project_id AND r.item_id=p.item_id AND r.request_key=p.request_key
                 WHERE p.project_id=? AND p.item_id=? ORDER BY p.created_at,p.id''',(project,item))]
+            extracted=s._connection.execute('SELECT id FROM native_runs WHERE project_id=? AND item_id=? AND input_id=?',
+                (project,item,attempts[-1]['input_id'] if attempts else inputs[-1]['id'])).fetchone()
             return dict(value,inputs=inputs,attempts=attempts,retry_requests=plans,
                         current_input_id=attempts[-1]['input_id'] if attempts else inputs[-1]['id'],latest=attempts[-1] if attempts else None,
-                        semantic_status='not-performed',attribution='project-only',model_authorization='not-granted')
+                        semantic_status='extracted' if extracted else 'not-performed',attribution='see-native-decisions' if extracted else 'project-only',model_authorization='not-granted')
 
     def batch(self,project,batch):
         with unit_of_work(self.database,self.principal) as s:

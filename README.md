@@ -45,7 +45,7 @@ Inspect the proposed state, its source, and its impact before confirming a chang
 
 [![Synthetic prototype: inspect a candidate change and its evidence before confirmation](video/out/gifs/02-review-changes.gif)](video/out/gifs/02-review-changes.gif)
 
-*Prototype confirmation reaches “awaiting acceptance.” In the real local workspace, saving a candidate, reviewing it, and formally committing it are distinct operations; uploads do not automatically generate candidates.*
+*Prototype confirmation reaches “awaiting acceptance.” In the real local workspace, saving a candidate, reviewing it, and formally committing it are distinct operations; native extraction is a separate action that saves sourced candidates.*
 
 ### 3. Find dependencies and the next step
 
@@ -55,16 +55,17 @@ Move between the task list and graph to inspect prerequisites, blockers, and exe
 
 ## What works today
 
-Current code: **nextrelay 0.7.0 · schema v7**. This is a local development implementation for synthetic materials, with a separate in-memory prototype.
+Current code: **nextrelay 0.8.0 · schema v8**. This is a local development implementation for synthetic materials, with a separate in-memory prototype.
 
 | Area | Current delivery |
 | --- | --- |
 | Projects and files | Create/select projects, upload local files, inspect per-item results, and retry failed items. Local format support: TXT, Markdown, protocol JSON, and static HTML. |
 | Documents and evidence | Read saved content, named sources, exact artifact versions, and associated evidence. |
+| Native organization | Extract actual imported text, match tasks/Sessions/Attempts, retain independent origins, show complements/conflicts, and automatically identify correctable revisions. |
 | Changes and history | Save existing-service candidates, review them, commit approved changes, and inspect history and single-change compensating reversal. |
 | Tasks and dependencies | Read task lists/graphs and dependency state; existing services support task lifecycle, review, limited checks, and human acceptance. |
 | Persistence | The real local mode uses SQLite and an explicitly selected originals directory. The synthetic preview uses memory and resets on refresh. |
-| Not connected | Automatic semantic extraction/matching/merging, model processing, GitHub repository reading, cloud storage, and Context Sync. Deletion/recovery and full development-readiness flows are also incomplete. |
+| Not connected | Model processing, GitHub repository reading, cloud storage, and Context Sync. Deletion/recovery and full development-readiness flows are also incomplete. |
 
 The local subset is not a completed MVP or a production service; no performance or production-readiness claim is implied.
 
@@ -74,7 +75,7 @@ The local subset is not a completed MVP or a production service; no performance 
 
 The product module for bringing user-provided session outcomes together with sources, decisions, and change history. It proposes traceable updates rather than silently changing formal state.
 
-**Today:** local ingestion, content/source/version reading, and reviewed change services provide part of this foundation. Automatic semantic organization and merging are pending.
+**Today:** local ingestion, content/source/version reading, and reviewed change services provide part of this foundation. Native extraction, inspectable matching, complementary views, conflict detection and correctable version families are available locally.
 
 ### Control Tower — understand where the work stands
 
@@ -92,7 +93,7 @@ The planned module for retrieving current project state and preparing context wh
 
 [![Product workflow with current local steps and planned semantic processing and context handoff explicitly distinguished](docs/readme/assets/workflow.svg)](docs/readme/assets/workflow.svg)
 
-The workflow is: work in your AI tool → provide outcomes → organize proposed updates → review changes → inspect project state → continue working, with a context handoff when needed. Automatic organization and real Context Sync remain planned.
+The workflow is: work in your AI tool → provide outcomes → organize proposed updates → review changes → inspect project state → continue working, with a context handoff when needed. Local native organization is available; real Context Sync remains planned.
 
 ## Inside NextRelay
 
@@ -110,3 +111,18 @@ Three mechanisms matter to the product experience:
 - **Explicit uncertainty:** incomplete imports, unavailable capabilities, and writes awaiting confirmation remain visible.
 
 **License:** this checkout has no root project license file. Project-wide redistribution terms have not been declared here.
+
+
+## Run native extraction locally (T08)
+
+Use Python 3.14 and a **new independent synthetic database**, outside this checkout and OneDrive. Set `NEXTRELAY_ENV=development`, `NEXTRELAY_AUTH_MODE=dev-token`, a freshly generated `NEXTRELAY_DEV_TOKEN`, `NEXTRELAY_DB_PATH`, an existing `NEXTRELAY_LOCAL_ROOT`, and a free `NEXTRELAY_PORT`. Run `python -m nextrelay init-db` explicitly, then `python -m nextrelay serve`. The server does not migrate a database on startup. Existing databases need an explicit upgrade while their service is stopped; this task did not upgrade any existing user database.
+
+In the real local workspace, upload UTF-8 TXT, Markdown, protocol JSON or static HTML, then choose **执行／恢复原生提取** on the materials page. Inspect each document's source, exact input fingerprint, field positions, matching decisions and version relationship. Correct attribution or version families there and save current candidates; use the existing review page to review and formally commit them. Extraction never reviews or commits its own output. The separate synthetic mode retains its original behavior.
+
+Native rules recognize labelled `Task/任务`, `Session/会话`, `Attempt/回合`, `Goal/目标`, `Completion conditions/完成条件`, result, decision, risk and gap declarations. Multiple identities use semicolons. Multiple tasks/attempts together with multiple Sessions require explicit `contributions` triples (`task_id`, `session_id`, `attempt_id`; unknown values may be null); identity lists never imply every possible pairing. Exact project-local IDs, unique titles and qualified `namespace::external_id` values are inspectable matching signals. `# Task Descriptive title` and unresolved descriptive task names can propose a minimal new task. Unknown IDs and ambiguous names remain unresolved. JSON uses the existing `nextrelay.import` version 1 protocol; text declarations belong in document `text`, never in new authorization fields. Arbitrary prose is retained with its sections and source; no unrestricted language understanding or model processing is claimed.
+
+HTML native content includes inert heading levels and table-cell structure, with source lines and cell pointers; different cell boundaries are different content. Native processor `nextrelay-native/2` avoids reusing earlier lossy results. Identical content reuses a version but preserves independent origins. Same-title revisions use token-trigram Jaccard similarity >=0.80 with a unique family; similarity alone does not establish authority. Complementary views retain components and facts; contradictory key/value claims become explicit conflicts. Version corrections append family/parent history without moving immutable version rows. Correct a child before detaching its parent. Attribution corrections invalidate old native candidate approvals. Already committed effects use the existing reviewed compensating reversal and a new candidate; editing a suggestion does not undo a formal effect.
+
+Native limits: 100 documents, 256 KiB UTF-8 per document, 2 MiB per input, 200 comparison versions including proposed documents, 40,000 lexical tokens per document, 500 facts/sections and 100 declarations per identity kind. Limits fail explicitly without partial native writes or truncated success; saved T07 originals remain available. These are engineering bounds, not a capacity benchmark.
+
+Authenticated endpoints are documented in Architecture 9.7. Tests: `python -B -W error::ResourceWarning -m unittest discover -s tests -q`; frontend `npm run check`, `npm test`, `npm run build`. `frontend/tests/native-browser.mjs` accepts `--python`, `--playwright`, and optionally `--browser` to run real loopback browser integration in its own temporary directory. No real model, GitHub or cloud account is needed.

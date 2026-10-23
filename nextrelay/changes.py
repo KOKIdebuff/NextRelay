@@ -97,6 +97,26 @@ class Changes:
     def preconditions(self, project, spec):
         op, target, version = spec['operation'], spec['target_id'], spec['target_version_id']
         result = {'sources':[], 'evidence':[]}
+        if spec.get('native_context'):
+            from .native import Native
+            native=Native(self.s)
+            result['native'] = native.context(project,spec['native_context'])
+            doc=native.document(project,spec['native_context']['document_id'])
+            if spec['source_ids']!=[doc['locator']['source_id']]:
+                raise ChangeError('native_source_mismatch')
+            if op=='version.confirm' and (version!=doc['version_id'] or target not in doc['decision']['matches']['tasks'] or doc['decision']['matches']['pending']):
+                raise ChangeError('native_target_mismatch')
+            if op=='task.create':
+                import re
+                f=doc['findings']
+                titles=[v['value'] for v in f['declarations']['tasks']]
+                titles.append(re.sub(r'^(?:task|任务)\s+','',doc['title'],flags=re.I))
+                if spec['payload']['title'] not in titles or spec['payload']['goal']!=f['goal'] or spec['payload']['completion_conditions']!=f['completion_conditions']:
+                    raise ChangeError('native_target_mismatch')
+        if op=='version.confirm':
+            from .native import Native
+            safety=Native(self.s).requirements(project,version_id=version,target_id=target)
+            if safety['conflicts']:result['native_safety']=safety
         if op == 'task.create':
             if self.c.execute('SELECT 1 FROM tasks WHERE project_id=? AND id=?', (project,target)).fetchone():
                 raise ChangeError('target_exists')
@@ -146,7 +166,7 @@ class Changes:
     def save(self, project, request):
         p = self.s._project(project)
         exact(request, ('base_revision','operation','payload'),
-              ('target_id','target_version_id','source_ids','evidence_ids','risk','conflicts','impact','supersedes_id'))
+              ('target_id','target_version_id','source_ids','evidence_ids','risk','conflicts','impact','supersedes_id','native_context'))
         base = integer(request['base_revision'])
         if p['revision'] != base:
             raise ChangeError('revision_conflict')
@@ -210,6 +230,20 @@ class Changes:
         spec = dict(operation=op,target_id=target,target_version_id=version,payload=payload,
                     base_revision=base,source_ids=source_ids,evidence_ids=evidence_ids,
                     risk=risk,conflicts=conflicts,impact=impact)
+        if 'native_context' in request:
+            if op not in ('task.create','version.confirm'):
+                raise ChangeError('unsupported_native_operation')
+            spec['native_context'] = request['native_context']
+        if op=='version.confirm' or spec.get('native_context'):
+            from .native import Native
+            required=Native(self.s).requirements(project,
+                document_id=spec.get('native_context',{}).get('document_id'),
+                version_id=version if op=='version.confirm' else None,
+                target_id=target if op=='version.confirm' else None)
+            spec['conflicts']=sorted(set(conflicts+required['conflicts']))
+            if len(spec['conflicts'])>100:raise ChangeError('native_conflict_limit')
+            if spec['conflicts']:spec['risk']='conflict'
+            risk=spec['risk']
         spec['preconditions'] = self.preconditions(project,spec)
         supersedes = request.get('supersedes_id')
         if supersedes is not None:
@@ -375,6 +409,9 @@ class Changes:
         elif op == 'version.confirm':
             self.s.link_version_task(project,version,target)
             self.s._insert(project,'confirmed_version_links',task_id=target,version_id=version,change_id=change_id)
+            if spec.get('native_context'):
+                from .native import Native
+                Native(self.s).apply_associations(project,spec)
         elif op == 'baseline.set':
             old = spec['preconditions']['baseline']
             self.s._insert(project,'baseline_history',version_id=version,previous_version_id=old['version_id'] if old else None,

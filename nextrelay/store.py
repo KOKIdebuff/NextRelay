@@ -336,7 +336,13 @@ class Store:
         )]
         return {'version_id': version_id, 'source_status': 'linked' if sources else 'pending',
                 'sources': sources,
-                'attributions': [self.attribution(project_id, source['id']) for source in sources]}
+                'attributions': [self.attribution(project_id, source['id']) for source in sources],
+                # Independent duplicate sources remain visible without silently
+                # extending the frozen evidence basis of a formal version.
+                'native_origins': [dict(r) for r in self._connection.execute('''
+                    SELECT d.id AS document_id,d.locator_json,r.source_id,r.input_id,r.item_id
+                    FROM native_documents d JOIN native_runs r ON r.project_id=d.project_id AND r.id=d.run_id
+                    WHERE d.project_id=? AND d.version_id=?''',(project_id,version_id))]}
 
 
     @operation(write=True)

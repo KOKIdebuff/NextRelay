@@ -13,6 +13,7 @@ from .formats import ImportFailure, MAX_FILE, MAX_BATCH, MAX_FILES, display_name
 from .ingestion import ImportService, SelectedFile
 from . import localfiles
 from .store import unit_of_work
+from .native import Native, NativeService
 
 MAX_REQUEST = (MAX_BATCH * 4 // 3) + 128 * 1024
 HISTORY = ('change_commits','applied_changes','baseline_history','effect_corrections','reversal_previews')
@@ -123,11 +124,12 @@ class BusinessAPI:
         for v in versions:
             v.pop('content')
             v['provenance']=s.version_provenance(project,v['id'])
+            v['native_relation']=Native(s).relation(project,v['id'])
         return dict(formal=state,**self.candidates(s,project),
             artifacts=s.records(project,'artifacts'),versions=versions,
             sources=s.records(project,'sources'),attributions=s.records(project,'source_attributions'),
             evidence=s.records(project,'evidence'),version_sources=s.records(project,'version_sources'),
-            history={k:s.records(project,k) for k in HISTORY})
+            history={k:s.records(project,k) for k in HISTORY},native=Native(s).listing(project))
 
     def handle(self, env, path, method):
         if path.startswith('/api/requests/') and method=='GET':
@@ -150,7 +152,7 @@ class BusinessAPI:
             return dict(mode='local',data='synthetic-only',
                 local_storage={'choice':'configured-local','directory':str(self.settings.local_root) if self.settings.local_root else None},
                 limits={'files':MAX_FILES,'file_bytes':MAX_FILE,'batch_bytes':MAX_BATCH},
-                capabilities={'format_parse':True,'semantic_extraction':False,'context_sync':False,'cloud_storage':False})
+                capabilities={'format_parse':True,'semantic_extraction':True,'context_sync':False,'cloud_storage':False})
         parts=path.strip('/').split('/')
         if parts[:2]!=['api','projects']:
             raise AccessError(404,'route_not_found')
@@ -177,6 +179,8 @@ class BusinessAPI:
                     return imp.batch(project,tail[1])
             if len(tail)>=2 and tail[0]=='items':
                 imp=self.importer()
+                if len(tail)==5 and tail[2]=='inputs' and tail[4]=='original':
+                    return {'base64':base64.b64encode(imp.read_original(project,tail[1],input_id=tail[3])).decode('ascii')}
                 if len(tail)==2:
                     return imp.item(project,tail[1])
                 if len(tail)==3 and tail[2]=='parsed':
@@ -189,6 +193,9 @@ class BusinessAPI:
                 if tail==['formal']:return s.formal_state(project)
                 if tail==['candidates']:return self.candidates(s,project)
                 if tail==['history']:return {k:s.records(project,k) for k in HISTORY}
+                if tail==['native']:return Native(s).listing(project)
+                if tail in (['sessions'],['attempts']):return {tail[0]:s.records(project,tail[0])}
+                if len(tail)==3 and tail[:2]==['native','documents']:return Native(s).document(project,tail[2])
                 if len(tail)==2 and tail[0]=='candidates':return dict(s.candidate(project,tail[1]),authorization=Changes(s).authorization(s.candidate(project,tail[1])))
                 if len(tail)==2 and tail[0]=='commits':return {'result':s.commit_result(project,tail[1])}
                 if tail==['artifacts']:return {'artifacts':s.records(project,'artifacts')}
@@ -204,13 +211,25 @@ class BusinessAPI:
                 if len(tail)==2 and tail[0]=='sources':return dict(s.get(project,'sources',tail[1]),attribution=s.attribution(project,tail[1]))
                 if len(tail)==2 and tail[0]=='versions':
                     return dict(version=s.get(project,'artifact_versions',tail[1]),provenance=s.version_provenance(project,tail[1]),
+                                native_relation=Native(s).relation(project,tail[1]),
                                 evidence=[e for e in s.records(project,'evidence') if e['version_id']==tail[1]])
                 if len(tail)==3 and tail[0]=='artifacts' and tail[2]=='versions':
                     s.get(project,'artifacts',tail[1])
-                    return {'versions':[{k:v for k,v in r.items() if k!='content'} for r in s.records(project,'artifact_versions') if r['artifact_id']==tail[1]]}
+                    return {'versions':[dict({k:v for k,v in r.items() if k!='content'},native_relation=Native(s).relation(project,r['id'])) for r in s.records(project,'artifact_versions') if ((Native(s).relation(project,r['id']) or {}).get('family_id',r['artifact_id']))==tail[1]]}
             raise AccessError(404,'route_not_found')
         if method!='POST':raise AccessError(405,'method_not_allowed')
         body=read_json(env);key=request_key(env)
+        if len(tail)==3 and tail[0]=='items' and tail[2]=='extract':
+            exact(body,('base_revision',))
+            # A replay is readable even after the input file disappears or the
+            # project advances; the result and all extraction writes are atomic.
+            with unit_of_work(self.settings.database,self.principal) as s:
+                old=s._connection.execute('SELECT * FROM http_receipts WHERE subject=? AND request_key=?',(self.principal.subject,key)).fetchone()
+                if old:
+                    if old['route']!=path or old['fingerprint']!=digest(body):raise ChangeError('idempotency_key_reused')
+                    return json.loads(old['result_json'])
+            return NativeService(self.importer()).extract_item(project,tail[1],base_revision=body['base_revision'],
+                finish=lambda s,op:self.receipt(s,key,path,body,op))
         if tail==['imports']:
             return self.upload(project,key,body)
         if len(tail)==3 and tail[0]=='imports' and tail[2]=='process':
@@ -229,6 +248,19 @@ class BusinessAPI:
         with unit_of_work(self.settings.database,self.principal,write=True) as s:
             s.project(project)
             def operation():
+                if len(tail)==4 and tail[:2]==['native','documents']:
+                    n=Native(s)
+                    if tail[3]=='correct':return n.correct(project,tail[2],body)
+                    if tail[3]=='rematch':return n.rematch(project,tail[2],body)
+                    if tail[3]=='candidates':return n.propose(project,tail[2],body)
+                if len(tail)==4 and tail[:2]==['native','versions'] and tail[3]=='correct':
+                    return Native(s).correct_relation(project,tail[2],body)
+                if tail==['sessions']:
+                    exact(body,('title',),('namespace','external_id'));return s.create_session(project,**body)
+                if tail==['attempts']:
+                    exact(body,('task_id','title'),('namespace','external_id'));return s.create_attempt(project,**body)
+                if len(tail)==3 and tail[0]=='attempts' and tail[2]=='sessions':
+                    exact(body,('session_id',));s.link_attempt_session(project,tail[1],body['session_id']);return {'linked':True}
                 if tail==['candidates']:
                     c=s.save_candidate(project,body)
                     return dict(c,authorization=Changes(s).authorization(c))
