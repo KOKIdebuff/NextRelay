@@ -9,3 +9,6 @@ __pycache__/
 *.db
 *.db-*
 /REQUIREMENTS_BASELINE_v0.6.md
+
+# Markdown documents stay local; existing tracked READMEs remain unchanged remotely.
+*.[mM][dD]

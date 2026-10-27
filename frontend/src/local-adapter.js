@@ -9,7 +9,7 @@ const life={todo:'待办','in-progress':'进行中','awaiting-acceptance':'待�
 const validity={applicable:'适用','pending-review':'待复核',inapplicable:'不适用',unknown:'未知'};
 const processing={applied:'confirm',approve:'approved',reject:'reject',defer:'defer',pending:'pending',superseded:'superseded'};
 const pretty=v=>JSON.stringify(v,null,2);
-const operationNames={'task.create':'创建任务','task.update':'修改任务目标／标题','version.confirm':'确认精确成果版本','baseline.set':'指定需求主基线','task.start':'开始任务','task.submit':'提交待验收','acceptance.human':'明确人工验收','acceptance.auto':'预授权检查验收','check.authorize':'授权精确版本检查验收','dependency.add':'添加硬依赖','recheck.resolve':'处理待复核事项','change.revoke':'单次撤销'};
+const operationNames={'thread.duty.set':'指定职责','thread.duty.suggest':'记录职责建议（提交后仍待确认）','thread.duty.confirm':'确认职责建议','task.participation.set':'调整当前参与／分工','task.lead.set':'设置／清空主负责','thread.succession.set':'调整承接关系','task.create':'创建任务','task.update':'修改任务目标／标题','version.confirm':'确认精确成果版本','baseline.set':'指定需求主基线','task.start':'开始任务','task.submit':'提交待验收','acceptance.human':'明确人工验收','acceptance.auto':'预授权检查验收','check.authorize':'授权精确版本检查验收','dependency.add':'添加硬依赖','recheck.resolve':'处理待复核事项','change.revoke':'单次撤销'};
 export async function encodeFile(file){
   const bytes=new Uint8Array(await file.arrayBuffer());let text='';
   for(let i=0;i<bytes.length;i+=32768)text+=String.fromCharCode(...bytes.subarray(i,i+32768));
@@ -18,7 +18,7 @@ export async function encodeFile(file){
 
 export class LocalAdapter extends WorkspaceAdapter {
   constructor(token,{fetchImpl=globalThis.fetch?.bind(globalThis),storage=globalThis.sessionStorage}={}){
-    super();this.token=token;this.fetch=fetchImpl;this.storage=storage;this.projectId=null;this.pending=null;this.view=empty();this.bodyCache=new Map();
+    super();this.token=token;this.fetch=fetchImpl;this.storage=storage;this.projectId=null;this.pending=null;this.view=empty();this.bodyCache=new Map();this.modelPreviews=new Map();
     try{const p=JSON.parse(storage?.getItem('nextrelay.pending')||'null');if(p&&/^[A-Za-z0-9_-]{8,128}$/.test(p.requestKey)&&typeof p.path==='string'&&p.path.startsWith('/api/'))this.pending={path:p.path,requestKey:p.requestKey};}catch{/* invalid local UI metadata grants no authority */}
   }
   async request(path,{body,requestKey}={}){
@@ -56,6 +56,8 @@ export class LocalAdapter extends WorkspaceAdapter {
       }));
       return {...b,items,candidateIds:[],resultDocs:documents.filter(d=>d.batchId===b.id).map(d=>`${d.id}|${d.version}`)};
     }));
+    const githubSnapshots=caps.local_storage.directory?(await this.request(this.path('github'))).snapshots:[];
+    const modelBatches=caps.local_storage.directory?(await this.request(this.path('model-batches'))).batches:[];
     const f=raw.formal,derived=f.derived?.tasks||[];
     const candidates=raw.candidates.map(c=>({id:c.candidate_id,raw:c,title:(operationNames[c.operation]||c.operation)+(c.spec.payload.title?'：'+c.spec.payload.title:''),base:c.spec.base_revision,kind:c.risk,state:processing[c.processing]||c.processing,taskId:c.target_id,batchId:'',current:pretty(c.spec.preconditions.task||c.spec.preconditions),proposed:pretty(c.spec.payload),basis:c.spec.source_ids.join('；')||'未提供来源；请核对创建依据，不视为文件自动提取结果',impact:c.spec.impact,history:raw.reviews.filter(r=>r.candidate_id===c.candidate_id).map(r=>`${r.decision} · ${r.basis}`)}));
     const tasks=f.tasks.map((t,i)=>{
@@ -66,7 +68,7 @@ export class LocalAdapter extends WorkspaceAdapter {
     });
     const changes=raw.history.applied_changes.map(a=>{const spec=JSON.parse(a.effect_json);return {id:a.id,title:spec.operation,taskId:spec.target_id,version:raw.history.change_commits.find(c=>c.id===a.commit_id)?.revision,active:f.change_effects.find(e=>e.change_id===a.id)?.active,dependsOn:[],group:a.commit_id,basis:raw.reviews.find(r=>r.id===a.review_id)?.basis||'',raw:a};});
     this.storage?.setItem('nextrelay.project',pid);
-    this.view={mode:'local',projectId:pid,title:f.project.title,goal:'真实本地业务 API · 原生提取与独立审查 · Context Sync 尚未接通',snapshotVersion:f.project.revision,sourceTime:'读取于 '+new Date().toLocaleString('zh-CN')+'；来源时间见记录',projects:this.projects,capabilities:caps,tasks,edges:f.current_dependencies.map(d=>[d.predecessor_id,d.successor_id]),documents,relations:f.confirmed_versions.map(r=>({taskId:r.task_id,document:(raw.versions.find(v=>v.id===r.version_id)?.native_relation?.family_id||raw.versions.find(v=>v.id===r.version_id)?.artifact_id),version:r.version_id,state:'confirmed'})),candidates,batches,changes,constraints:[],formal:f,raw};
+    this.view={mode:'local',projectId:pid,title:f.project.title,goal:'真实本地业务 API · 原生提取与独立审查 · Context Sync 尚未接通',snapshotVersion:f.project.revision,sourceTime:'读取于 '+new Date().toLocaleString('zh-CN')+'；来源时间见记录',projects:this.projects,capabilities:caps,tasks,edges:f.current_dependencies.map(d=>[d.predecessor_id,d.successor_id]),documents,relations:f.confirmed_versions.map(r=>({taskId:r.task_id,document:(raw.versions.find(v=>v.id===r.version_id)?.native_relation?.family_id||raw.versions.find(v=>v.id===r.version_id)?.artifact_id),version:r.version_id,state:'confirmed'})),candidates,batches,modelBatches,githubSnapshots,changes,constraints:[],formal:f,raw};
     return this.view;
   }
   async post(resource,body){
@@ -97,6 +99,10 @@ export class LocalAdapter extends WorkspaceAdapter {
     else if(intent.type==='refresh'){/* authoritative reload */}
     else if(intent.type==='create-project'){
       const p=await this.post('/api/projects',{title:intent.title});this.projectId=p.id;
+    }else if(intent.type==='github-prepare'){
+      await this.post('github',{url:intent.url,storage_choice:'configured-local',...(intent.ref?{ref:intent.ref}:{})});message='来源范围已准备；请核对 commit、路径和不完整性后读取。普通 URL 仅保存引用。';
+    }else if(intent.type==='github-action'){
+      const result=await this.post(`github/${intent.id}/${intent.action}`,intent.body||{});message=result.request_state==='registered'?'原请求已登记，结果尚未确认；请核对快照并在租约到期后恢复，不视为操作完成。':'来源操作已记录，请核对逐项读取、保存和解析状态。模型发送与正式变更仍须独立批准。';
     }else if(intent.type==='upload'){
       const caps=this.capabilities.limits,files=[...intent.files];
       if(!files.length||files.length>caps.files||files.some(f=>f.size>caps.file_bytes)||files.reduce((n,f)=>n+f.size,0)>caps.batch_bytes)throw Error('文件超出 20 项／单项 5 MiB／批次 25 MiB 限额');
@@ -116,6 +122,17 @@ export class LocalAdapter extends WorkspaceAdapter {
       const doc=this.view.raw.native.runs.flatMap(r=>r.documents).find(d=>d.id===intent.id);
       if(!doc?.relation)throw Error('此版本没有原生版本关系');
       await this.post(`native/versions/${doc.version_id}/correct`,{base_revision:this.view.snapshotVersion,expected_relation_id:doc.relation.id,...intent.request});message='版本关系纠正已追加保存；旧版本正文、权威及验收保持独立。';
+    }else if(intent.type==='model-prepare'){
+      await this.post('model-batches',{import_batch_id:intent.importBatchId,protocol:'nextrelay.model/2',...(intent.itemIds?{item_ids:intent.itemIds}:{})});message='本批发送清单已准备；请阅读实际请求，再明确批准或拒绝。尚未发送模型。';
+    }else if(intent.type==='model-preview'){
+      this.modelPreviews.set(intent.id,await this.request(this.path(`model-batches/${intent.id}/preview`)));message='已读取实际序列化请求；此操作没有调用模型。';
+    }else if(intent.type==='model-decision'){
+      const batch=this.view.modelBatches.find(b=>b.id===intent.id);
+      if(!batch)throw Error('请刷新批次清单');
+      if(intent.decision==='approved'&&!this.modelPreviews.has(intent.id))throw Error('请先展开实际请求预览');
+      await this.post(`model-batches/${intent.id}/decision`,{fingerprint:batch.fingerprint,decision:intent.decision});if(intent.decision==='denied')this.modelPreviews.delete(intent.id);message=intent.decision==='denied'?'已拒绝本批模型处理；原件、格式结果和原生结果仍可阅读。':'仅批准此指纹清单的模型发送；候选仍须独立审查和正式提交。';
+    }else if(intent.type==='model-execute'||intent.type==='model-recover'){
+      await this.post(`model-batches/${intent.id}/${intent.type.slice(6)}`,{});this.modelPreviews.delete(intent.id);message='已读取持久处理结果；成功只保存候选，结果未知不会自动重发。';
     }else if(intent.type==='run-check'){
       await this.post('checks',{task_id:intent.taskId,version_id:intent.versionId,configuration:intent.configuration});message='本地内置检查已执行；查看服务端真实结果。检查通过仍不等于验收。';
     }else if(intent.type==='auto-accept'){

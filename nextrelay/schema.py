@@ -173,4 +173,13 @@ from .schema_t11 import V7
 from .schema_t08 import migration as t08_migration, T08_TABLES
 V8 = t08_migration(record, ref)
 ENTITY_TABLES += T08_TABLES
-MIGRATIONS = {1: V1, 2: V2, 3: V3, 4: V4, 5: V5, 6: V6, 7: V7, 8: V8}
+from .schema_t09 import migration as t09_migration, T09_TABLES
+V9 = t09_migration(record, ref)
+ENTITY_TABLES += T09_TABLES
+from .schema_t10 import migration as t10_migration, T10_TABLES
+V10 = t10_migration(record, ref)
+ENTITY_TABLES += T10_TABLES
+from .schema_t19 import migration as t19_migration, T19_TABLES
+V11 = t19_migration(record, ref, V2, V3, V4, V5)
+ENTITY_TABLES += T19_TABLES
+MIGRATIONS = {1: V1, 2: V2, 3: V3, 4: V4, 5: V5, 6: V6, 7: V7, 8: V8, 9: V9, 10: V10, 11: V11}

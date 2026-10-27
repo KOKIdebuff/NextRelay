@@ -220,7 +220,7 @@ class ImportService:
             AND NOT EXISTS(SELECT 1 FROM original_links n WHERE n.project_id=l.project_id AND n.supersedes_id=l.id)''',
             (project,input_row['id'])).fetchone()
 
-    def _attempt(self,s,project,item,input_row):
+    def _attempt(self,s,project,item,input_row,*,remote_data=None):
         selected=json.loads(input_row['selection_json'])
         old=self._latest(s,'ingest_attempts',project,item)
         ordinal=1 if old is None else old['ordinal']+1
@@ -231,7 +231,7 @@ class ImportService:
             if selected['storage_choice']=='cloud-requested':
                 raise ImportFailure('real_cloud_storage_not_connected','save')
             existing=self._link(s,project,input_row)
-            data=localfiles.inspect(existing['location'] if existing else selected['path'])
+            data=remote_data if remote_data is not None else localfiles.inspect(existing['location'] if existing else selected['path'])
             if digest(data)!=input_row['fingerprint'] or len(data)!=input_row['byte_size']:
                 raise ImportFailure('input_changed_select_new_version','read')
             paths=self._claim(input_row)
@@ -244,10 +244,12 @@ class ImportService:
                 if localfiles.inspect(paths['original'])!=data:
                     raise ImportFailure('saved_content_mismatch','save')
                 self.fault('before_link')
-                source=s.create_source(project,reference='local-import:'+input_row['id'],
+                remote=selected.get('github') or {}
+                source=s.create_source(project,reference=remote.get('reference','local-import:'+input_row['id']),
+                    namespace='github' if remote else None, git_commit=remote.get('commit'),source_path=remote.get('path'),
                     fingerprint=input_row['fingerprint'],storage_choice='user-local',
                     availability='unknown',read_result='saved-see-import-availability',
-                    metadata={'import_input_id':input_row['id'],'byte_size':len(data),'display_name':selected['name']})['id']
+                    metadata={'import_input_id':input_row['id'],'byte_size':len(data),'display_name':selected['name'],**remote})['id']
                 s._insert(project,'original_links',input_id=input_row['id'],location=str(paths['original']),
                           result_location=str(paths['parsed']) if selected['parse'] else None,supersedes_id=None)
             else:
@@ -258,7 +260,7 @@ class ImportService:
             save_status='saved'
             if selected['parse']:
                 try:
-                    result,payload=parse(data,selected['name'],selected['media_type'])
+                    result,payload=parse(data,selected.get('format_name',selected['name']),selected['media_type'])
                     result_sha=digest(payload)
                     # Retry parsing keeps the same Source/original. A failed
                     # partial parsed output is cleaned only under its marker.
@@ -581,3 +583,34 @@ class ImportService:
             for row in rows:
                 results.append({'input_id':row['id'],'cleanup':'clean' if self._cleanup(dict(row),finals=self._link(s,project,row) is None) else 'cleanup-pending'})
         return results
+
+    def save_github(self,s,project,snapshot,entry,data,*,register_only=False):
+        """Caller holds one short write transaction AFTER network completion.
+
+        Remote budget is enforced by GitHubService; keep T07 per-format limits.
+        One independent ingest batch per remote file avoids applying upload's 20
+        file cap to a 100-file snapshot. Existing native/model services consume it.
+        """
+        request_key='github:'+snapshot['id']+':'+entry['id']
+        old=s._connection.execute('SELECT * FROM ingest_batches WHERE project_id=? AND request_key=?',(project,request_key)).fetchone()
+        if old:
+            item=s._connection.execute('SELECT id FROM ingest_items WHERE project_id=? AND batch_id=?',(project,old['id'])).fetchone()[0]
+            inp=s._connection.execute('SELECT * FROM ingest_inputs WHERE project_id=? AND item_id=? ORDER BY ordinal LIMIT 1',(project,item)).fetchone()
+            latest=s._connection.execute('SELECT * FROM ingest_attempts WHERE project_id=? AND item_id=? AND input_id=? ORDER BY ordinal DESC LIMIT 1',(project,item,inp['id'])).fetchone()
+            if not register_only and (latest is None or latest['save_status']!='saved'):
+                self._attempt(s,project,item,inp,remote_data=data)
+            return item
+        name=display_name(entry['path'].rsplit('/',1)[-1])
+        remote={'snapshot_id':snapshot['id'],'commit':snapshot['git_commit'],'path':entry['path'],
+                'repository':snapshot['repo'],'snapshot_source_id':snapshot['source_id'],
+                'reference':'https://github.com/'+snapshot['repo']+'/blob/'+snapshot['git_commit']+'/'+entry['path']}
+        manifest=encoded({'github':remote,'sha256':digest(data)}).decode()
+        batch=s._insert(project,'ingest_batches',request_key=request_key,manifest_json=manifest,fingerprint=digest(manifest.encode()),processing_version=PROCESSOR)
+        item=s._insert(project,'ingest_items',batch_id=batch['id'],position=0)
+        inp=s._insert(project,'ingest_inputs',item_id=item['id'],ordinal=1,
+            selection_json=encoded({'name':name,'path':str(self.root/'remote-unused'),'media_type':None,
+                'storage_choice':'user-local','parse':True,'local_root':str(self.root),'github':remote,
+                'format_name':name+'.txt' if name.lower()=='readme' else name}).decode(),
+            fingerprint=digest(data),byte_size=len(data),preflight_error=None)
+        if not register_only:self._attempt(s,project,item['id'],inp,remote_data=data)
+        return item['id']

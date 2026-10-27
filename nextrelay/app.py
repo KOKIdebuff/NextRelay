@@ -32,7 +32,7 @@ def create_app(settings):
             method = environ.get('REQUEST_METHOD','GET')
             path = environ.get("PATH_INFO", "")
             static = {'/':'index.html','/src/style.css':'src/style.css',
-                **{'/src/'+f:'src/'+f for f in ('app.js','ux.js','reader-state.js','synthetic-adapter.js','workspace-adapter.js','local-adapter.js','local-ui.js')}}
+                **{'/src/'+f:'src/'+f for f in ('app.js','ux.js','reader-state.js','synthetic-adapter.js','workspace-adapter.js','local-adapter.js','local-ui.js','github-ui.js')}}
             if path in static:
                 if method!='GET':raise AccessError(405,'method_not_allowed')
                 payload=(Path(__file__).resolve().parents[1]/'frontend'/static[path]).read_bytes()
@@ -88,7 +88,7 @@ def foundation(settings,principal,path):
             return {'stage':'T11-local-subset',
                     'identity':{'subject':principal.subject,'method':principal.method},
                     'storage':{'engine':'sqlite','schema_version':SCHEMA_VERSION},
-                    'model':{'enabled':False},'data':'synthetic-only'}
+                    'model':{'enabled':bool(settings.model and settings.model.provider!='disabled')},'data':'synthetic-only'}
         if path.startswith('/api/foundation/scopes/'):
             return require_owned_scope(connection,principal,path.removeprefix('/api/foundation/scopes/'))
         raise AccessError(404,'route_not_found')

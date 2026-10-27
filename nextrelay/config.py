@@ -21,6 +21,8 @@ class Settings:
     environment: str = "development"
     auth_mode: str = "dev-token"
     local_root: Path | None = None
+    model: object = None
+    github: object = None  # code-only controlled test injection; no env endpoint
 
     def __post_init__(self):
         if sys.version_info[:2] != (3, 14):
@@ -71,8 +73,17 @@ def load_settings(environ=None):
         port = int(env.get("NEXTRELAY_PORT", "8000"))
     except ValueError:
         raise ConfigError("NEXTRELAY_PORT must be an integer") from None
+    from .model_provider import ModelConfig
+    try:
+        model=ModelConfig(provider=env.get('NEXTRELAY_MODEL_PROVIDER','disabled'),
+            model=env.get('NEXTRELAY_MODEL_NAME',''),
+            api_key=env.get('NEXTRELAY_MODEL_API_KEY',''),
+            endpoint=env.get('NEXTRELAY_MODEL_ENDPOINT','https://api.openai.com/v1/responses'))
+    except ValueError:
+        raise ConfigError('Invalid server model configuration; consult README') from None
     return Settings(
         database=database,
+        model=model,
         token=env.get("NEXTRELAY_DEV_TOKEN", ""),
         subject=env.get("NEXTRELAY_DEV_SUBJECT", "dev-synthetic-user"),
         host=env.get("NEXTRELAY_HOST", "127.0.0.1"),

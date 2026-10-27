@@ -97,6 +97,9 @@ class Changes:
     def preconditions(self, project, spec):
         op, target, version = spec['operation'], spec['target_id'], spec['target_version_id']
         result = {'sources':[], 'evidence':[]}
+        if spec.get('model_context'):
+            from .model import ModelContext
+            result['model'] = ModelContext(self.s).check(project,spec)
         if spec.get('native_context'):
             from .native import Native
             native=Native(self.s)
@@ -106,6 +109,9 @@ class Changes:
                 raise ChangeError('native_source_mismatch')
             if op=='version.confirm' and (version!=doc['version_id'] or target not in doc['decision']['matches']['tasks'] or doc['decision']['matches']['pending']):
                 raise ChangeError('native_target_mismatch')
+            if op in ('thread.duty.suggest','task.participation.set','task.lead.set'):
+                suggestion=result['native'].get('suggestion')
+                if not suggestion or not suggestion['actionable'] or any(spec[k]!=suggestion[k] for k in ('operation','target_id','payload')):raise ChangeError('native_suggestion_mismatch')
             if op=='task.create':
                 import re
                 f=doc['findings']
@@ -132,6 +138,9 @@ class Changes:
         elif op == 'baseline.set':
             self.s._get(project,'artifacts',target)
             result['baseline'] = self.baseline(project)
+        elif op.startswith('thread.') or op in ('task.participation.set','task.lead.set'):
+            from .threads import Threads
+            result['thread'] = Threads(self.s).preconditions(project,spec)
         elif op == 'change.revoke':
             from .reversals import Reversals
             result['reversal'] = Reversals(self.s).validate(project,spec)
@@ -166,12 +175,14 @@ class Changes:
     def save(self, project, request):
         p = self.s._project(project)
         exact(request, ('base_revision','operation','payload'),
-              ('target_id','target_version_id','source_ids','evidence_ids','risk','conflicts','impact','supersedes_id','native_context'))
+              ('target_id','target_version_id','source_ids','evidence_ids','risk','conflicts','impact','supersedes_id','native_context','model_context'))
         base = integer(request['base_revision'])
         if p['revision'] != base:
             raise ChangeError('revision_conflict')
         op = request['operation']
-        from .schema_t05 import OPERATIONS
+        from .schema_t05 import OPERATIONS as T05_OPERATIONS
+        from .schema_t19 import OPERATIONS as T19_OPERATIONS
+        OPERATIONS = T05_OPERATIONS + T19_OPERATIONS
         if op not in OPERATIONS + ('change.revoke',):
             raise ChangeError('unsupported_operation')
         payload = request['payload']
@@ -192,6 +203,12 @@ class Changes:
             exact(payload, ())
             target = content(request.get('target_id'))
             content(request.get('target_version_id'))
+        elif op in T19_OPERATIONS:
+            from .threads import Threads
+            payload = Threads(self.s).normalize(op,payload)
+            target = content(request.get('target_id'))
+            if 'target_version_id' in request or request.get('evidence_ids'):
+                raise ChangeError('unexpected_thread_input')
         elif op == 'change.revoke':
             exact(payload, ('preview_id',))
             content(payload['preview_id'])
@@ -219,6 +236,14 @@ class Changes:
             raise ChangeError('invalid_conflicts')
         conflicts = [content(v) for v in conflicts]
         risk = 'conflict' if conflicts or risk=='conflict' else ('high' if op in ('baseline.set','check.authorize','acceptance.human','acceptance.auto','recheck.resolve','change.revoke') else risk)
+        if op=='thread.duty.confirm':
+            from .native_threads import duty_confirmation_context
+            lineage=duty_confirmation_context(self.s,project,payload['suggestion_id'])
+            if lineage:
+                source_ids=sorted(set(source_ids+lineage['source_ids']))
+                conflicts=sorted(set(conflicts+lineage['conflicts']))
+                if len(source_ids)>100 or len(conflicts)>100:raise ChangeError('native_conflict_limit')
+                risk='conflict' if conflicts or risk=='conflict' or lineage['risk']=='conflict' else 'high' if risk=='high' or lineage['risk']=='high' else 'ordinary'
         impact = content(request.get('impact',''),empty=True)
         if not impact.strip():
             impact = {
@@ -226,12 +251,18 @@ class Changes:
                 'task.update': 'Append a formal title/goal snapshot and a pending recheck; preserve history.',
                 'version.confirm': 'Confirm this exact task/version relation; no acceptance or authority inheritance.',
                 'baseline.set': 'Switch the single requirements baseline to this exact version and record a pending recheck; readiness is not evaluated.',
+                'thread.duty.set': 'Assign this Thread duty version; preserve historical contributions and task acceptance.',
+                'thread.duty.suggest': 'Record an explicit pending duty suggestion; keep confirmed duties unchanged.',
+                'thread.duty.confirm': 'Confirm this exact explicit duty suggestion; grant no authentication or acceptance authority.',
+                'task.participation.set': 'Assign current participation independently of historical contributions; preserve task lifecycle and acceptance.',
+                'task.lead.set': 'Set or clear the optional lead among current participants; preserve task lifecycle and acceptance.',
+                'thread.succession.set': 'Correct this Thread succession relation; retain both identities and all task assignments and history.',
             }.get(op,'Apply this exact T05 operation; retain lifecycle, evidence and authorization history.')
         spec = dict(operation=op,target_id=target,target_version_id=version,payload=payload,
                     base_revision=base,source_ids=source_ids,evidence_ids=evidence_ids,
                     risk=risk,conflicts=conflicts,impact=impact)
         if 'native_context' in request:
-            if op not in ('task.create','version.confirm'):
+            if op not in ('task.create','version.confirm','thread.duty.suggest','task.participation.set','task.lead.set'):
                 raise ChangeError('unsupported_native_operation')
             spec['native_context'] = request['native_context']
         if op=='version.confirm' or spec.get('native_context'):
@@ -244,6 +275,18 @@ class Changes:
             if len(spec['conflicts'])>100:raise ChangeError('native_conflict_limit')
             if spec['conflicts']:spec['risk']='conflict'
             risk=spec['risk']
+        from .model import ModelContext
+        model=ModelContext(self.s)
+        if 'model_context' in request:
+            if op not in ('task.create','task.update','version.confirm','thread.duty.suggest','thread.duty.confirm','task.participation.set','task.lead.set'):
+                raise ChangeError('unsupported_model_operation')
+            spec['model_context']=request['model_context']
+            spec['conflicts']=sorted(set(spec['conflicts']+model.minimum_conflicts(project,spec['model_context'])))
+            model.check(project,spec)
+            spec['risk']='conflict' if spec['conflicts'] else 'high'
+            risk=spec['risk']
+        elif model.matching(project,spec):
+            raise ChangeError('model_context_required')
         spec['preconditions'] = self.preconditions(project,spec)
         supersedes = request.get('supersedes_id')
         if supersedes is not None:
@@ -346,13 +389,18 @@ class Changes:
                 if payload_hash in creations:
                     raise ChangeError('duplicate_formal_task')
                 creations.add(payload_hash)
-            target_key = ('baseline' if spec['operation']=='baseline.set' else 'task',spec['target_id'])
+            from .threads import effect_key
+            target_key = effect_key(spec)
             if target_key in targets:
                 raise ChangeError('overlapping_effects')
             targets.add(target_key)
             candidates.append((candidate,review))
         if any(c['risk']!='ordinary' for c,r in candidates) and len(candidates)!=1:
             raise ChangeError('explicit_commit_is_single')
+        from .threads import Threads
+        threads = Threads(self.s)
+        if threads.available():
+            threads.validate_batch(project,[c['spec'] for c,r in candidates])
         revision = base+1
         # Result identities are allocated once, then stored in the SAME transaction as effects.
         planned = [(c,r,str(uuid4()),str(uuid4())) for c,r in candidates]
@@ -363,7 +411,7 @@ class Changes:
         commit = self.s._insert(project,'change_commits',action='commit-candidates',request_key=key,
             request_fingerprint=fingerprint,request_json=canonical(normalized),result_json=canonical(result),
             base_revision=base,revision=revision)
-        for candidate,review,eid,aid in planned:
+        for candidate,review,eid,aid in sorted(planned,key=lambda p:threads.apply_order(p[0]['spec'])):
             self.insert_fixed(project,'effective_changes',eid,dict(candidate_id=candidate['candidate_id']))
             self.insert_fixed(project,'applied_changes',aid,dict(effective_change_id=eid,candidate_id=candidate['candidate_id'],
                 review_id=review['id'],commit_id=commit['id'],effect_json=canonical(candidate['spec'])))
@@ -416,6 +464,9 @@ class Changes:
             old = spec['preconditions']['baseline']
             self.s._insert(project,'baseline_history',version_id=version,previous_version_id=old['version_id'] if old else None,
                            revision=revision,change_id=change_id)
+        elif op.startswith('thread.') or op in ('task.participation.set','task.lead.set'):
+            from .threads import Threads
+            Threads(self.s).apply(project,spec,revision,change_id)
         elif op == 'change.revoke':
             from .reversals import Reversals
             Reversals(self.s).apply(project,spec,revision,change_id)
@@ -437,7 +488,8 @@ class Changes:
         row = self.c.execute('SELECT state_json FROM derived_snapshots WHERE project_id=? AND revision=?',(project,p['revision'])).fetchone()
         derived = json.loads(row[0]) if row else None
         processed = {r['request_id'] for r in self.rows(project,'recheck_processing')}
-        return dict(project=p,tasks=tasks,confirmed_versions=effects.active_rows(project,'confirmed_version_links'),
+        from .threads import Threads
+        return dict(project=p,tasks=tasks,thread_state=Threads(self.s).state(project),confirmed_versions=effects.active_rows(project,'confirmed_version_links'),
                     baseline=self.baseline(project),pending_rechecks=[r for r in self.rows(project,'recheck_requests') if r['id'] not in processed],
                     readiness='not-evaluated',acceptance='exact-version-dual-path',derived_state='current' if derived else 'not-computed',
                     derived=derived,acceptances=self.rows(project,'acceptances'),events=sorted(self.rows(project,'task_events'),key=lambda e:(e['revision'],e['id'])),

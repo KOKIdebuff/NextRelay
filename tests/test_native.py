@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from nextrelay.auth import AccessError, Principal
 from nextrelay.changes import ChangeError, Changes
-from nextrelay.db import initialize,connect,transaction,_version_catalog,verify_schema
+from nextrelay.db import initialize,connect,transaction,_version_catalog,verify_schema,SCHEMA_VERSION
 from nextrelay.schema import MIGRATIONS
 from nextrelay.ingestion import ImportService,SelectedFile
 from nextrelay.native import Native,NativeService,MAX_DOCUMENT
@@ -226,7 +226,7 @@ class NativeTests(unittest.TestCase):
                     for statement in MIGRATIONS[v]:c.execute(statement)
                 c.execute('PRAGMA user_version=7')
         initialize(db)
-        with connect(db) as c:verify_schema(c);self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0],8)
+        with connect(db) as c:verify_schema(c);self.assertEqual(c.execute('PRAGMA user_version').fetchone()[0],SCHEMA_VERSION)
         initialize(db)
 
 

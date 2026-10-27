@@ -1,6 +1,6 @@
 [project]
 name = "nextrelay"
-version = "0.8.0"
+version = "0.12.0"
 description = "NextRelay local business HTTP API and real workspace adapter"
 requires-python = ">=3.14,<3.15"
 dependencies = []

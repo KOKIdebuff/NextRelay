@@ -89,6 +89,9 @@ class Reversals:
         history = self.changes(project)
         original_revision = next(a['revision'] for a in history if a['id'] == original_id)
         root, op = spec['target_id'], spec['operation']
+        from .threads import Threads, target_kind
+        from .schema_t19 import OPERATIONS as T19_OPERATIONS
+        root_kind = target_kind(op)
         all_tasks = life.tasks(project)
         affected = set()
         significant = op in ('version.confirm', 'baseline.set', 'dependency.add', 'acceptance.human', 'acceptance.auto', 'recheck.resolve') or (
@@ -100,13 +103,13 @@ class Reversals:
             if change['revision'] <= original_revision or change['id'] in self.revoked(project):
                 continue
             other = json.loads(change['effect_json'])
-            related = other['target_id'] == root or other['target_id'] in affected or (
-                other['operation'] == 'dependency.add' and other['payload']['predecessor_id'] == root) or (
+            related = (target_kind(other['operation'])==root_kind and other['target_id'] == root) or (target_kind(other['operation'])=='task' and other['target_id'] in affected) or (
+                root_kind=='task' and other['operation'] == 'dependency.add' and other['payload']['predecessor_id'] == root) or (
                 op == 'baseline.set' and other['operation'] == 'baseline.set')
             item = dict(change_id=change['id'], effective_change_id=change['effective_change_id'],
                         candidate_id=change['candidate_id'], review_id=change['review_id'], commit_id=change['commit_id'],
                         revision=change['revision'], operation=other['operation'], target_id=other['target_id'],
-                        target_version_id=other['target_version_id'], payload=other['payload'])
+                        target_type=target_kind(other['operation']),target_version_id=other['target_version_id'], payload=other['payload'])
             (later if related else unrelated).append(item)
             if op == 'task.create' and related and other['operation'] != 'change.revoke':
                 conflicts.append(dict(change_id=change['id'], reason='creation-has-formal-references; review dependent corrections first'))
@@ -122,16 +125,30 @@ class Reversals:
         # current references rather than assuming commit ordering is sufficient.
         if op == 'task.create':
             refs = [a['id'] for a in history if a['id'] != original_id and a['id'] not in self.revoked(project)
-                    and (json.loads(a['effect_json'])['target_id'] == root or
+                    and ((target_kind(json.loads(a['effect_json'])['operation'])=='task' and json.loads(a['effect_json'])['target_id'] == root) or
                          (json.loads(a['effect_json'])['operation'] == 'dependency.add' and json.loads(a['effect_json'])['payload']['predecessor_id'] == root))
                     and json.loads(a['effect_json'])['operation'] != 'change.revoke']
             known = {c['change_id'] for c in conflicts}
             conflicts.extend(dict(change_id=c, reason='creation-has-formal-references') for c in refs if c not in known)
+        if op in T19_OPERATIONS:
+            original_with_revision=dict(original,revision=original_revision)
+            conflicts.extend(Threads(self.s).reversal_conflicts(project,original_with_revision,spec,history,self.revoked(project)))
+            # Relationship conflicts may reference a successor rather than the
+            # original target. Such changes must not be labelled unrelated.
+            related_ids={c['change_id'] for c in conflicts if 'change_id' in c}
+            related_ids.update(identity for c in conflicts for identity in c.get('change_ids',[]))
+            later.extend(item for item in unrelated if item['change_id'] in related_ids)
+            unrelated=[item for item in unrelated if item['change_id'] not in related_ids]
+            later.sort(key=lambda item:(item['revision'],item['change_id']))
         current = self.s.formal_state(project)
-        work = {table: self.s.records(project, table) for table in
-                ('attempts','artifact_version_tasks','artifact_tasks','version_sources','evidence','check_results')}
+        work_tables = ('attempts','artifact_version_tasks','artifact_tasks','version_sources','evidence','check_results',
+                       'task_sessions','attempt_sessions','source_attributions')
+        if Threads(self.s).available():
+            work_tables += ('contribution_duties',)
+        work = {table: self.s.records(project, table) for table in work_tables}
         return dict(project_id=project, base_revision=current['project']['revision'],
                     original=original, original_revision=original_revision, operation=op, target_id=root,
+                    target_type=root_kind,
                     target_version_id=spec['target_version_id'], fields=assigned_fields(spec),
                     subsequent_changes=later, preserved_unrelated_changes=unrelated,
                     affected_tasks=[dict(task=t, derived=next(v for v in current['derived']['tasks'] if v['task_id'] == t['task_id']))

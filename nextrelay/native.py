@@ -14,7 +14,7 @@ from .changes import ChangeError, Changes, canonical, exact, integer, content
 from .formats import encoded
 from .store import unit_of_work, TransactionAborted
 
-PROCESSOR = 'nextrelay-native/2'
+PROCESSOR = 'nextrelay-native/3'
 MAX_DOCUMENT = 256 * 1024
 MAX_TOTAL = 2 * 1024 * 1024
 MAX_DOCUMENTS = 100
@@ -23,6 +23,7 @@ MAX_FACTS = 500
 MAX_MATCHES = 100
 LABELS = {
     'task':'tasks', 'tasks':'tasks', '任务':'tasks',
+    'thread':'threads', 'threads':'threads', '线程':'threads',
     'session':'sessions', 'sessions':'sessions', '会话':'sessions',
     'attempt':'attempts', 'attempts':'attempts', '回合':'attempts',
     'goal':'goal', '目标':'goal', 'completion conditions':'conditions', '完成条件':'conditions',
@@ -87,7 +88,7 @@ def split_documents(parsed):
 
 
 def findings(document):
-    declarations={k:[] for k in ('tasks','sessions','attempts','project','revision')}
+    declarations={k:[] for k in ('tasks','sessions','threads','attempts','project','revision')}
     facts=[]; sections=[]; goals=[]; conditions=[]; flags=[]
     for i,line in enumerate(document.get('scan_text',document['text']).splitlines(),1):
         clean=re.sub(r'^\s*(?:[-*+]\s+|#+\s*)','',line).strip()
@@ -176,17 +177,20 @@ class Native:
                 current={t['task_id']:t for t in self.s.formal_state(project)['tasks']}
                 rows=[dict(r,title=current.get(r['id'],r)['title']) for r in rows]
             claims=f['declarations'][kind]
+            if kind=='sessions':claims=claims+f['declarations'].get('threads',[])
             if kind=='tasks' and not claims:
                 claims=[dict(value=re.sub(r'^(?:task|任务)\s+','',title,flags=re.I),line=1,implicit=True)]
             for claim in claims:
                 value=claim['value'];matches=[r for r in rows if value==r['id'] or
-                    (r['namespace'] is not None and value==r['namespace']+'::'+r['external_id']) or norm(value)==norm(r['title'])]
+                    (r['namespace'] is not None and value==r['namespace']+'::'+r['external_id']) or (kind=='tasks' and not re.fullmatch(r'[A-Za-z]+[-_]?\d+',value) and norm(value)==norm(r['title']))]
                 if len(matches)==1:
                     result[kind].append(matches[0]['id']);basis.append(dict(kind=kind,id=matches[0]['id'],claim=claim,
-                        rule='project-scoped-exact-identity-or-title'))
+                        rule='project-scoped-stable-identity' if kind!='tasks' or value==matches[0]['id'] or '::' in value else 'task-title-suggestion'))
                 elif not claim.get('implicit') or len(matches)>1:
                     pending.append(dict(kind=kind,claim=claim,reason='ambiguous' if matches else 'unresolved',options=[m['id'] for m in matches]))
             result[kind]=sorted(set(result[kind]))
+        from .native_threads import naming_conflict
+        if naming_conflict(self.s,project,f):pending.append(dict(kind='sessions',reason='thread-session-naming-conflict'))
         for attempt_id in result['attempts']:
             a=self.s.get(project,'attempts',attempt_id)
             if a['task_id'] not in result['tasks']:
@@ -208,6 +212,8 @@ class Native:
         return pairs
 
     def validate_matches(self,project,matches):
+        from .native_threads import compatible_matches
+        matches=compatible_matches(matches)
         exact(matches,('tasks','sessions','attempts'),('contributions',))
         for kind in ('tasks','sessions','attempts'):
             ids=matches[kind]
@@ -224,7 +230,11 @@ class Native:
         if not isinstance(pairs,list) or len(pairs)>2*MAX_MATCHES:raise ChangeError('invalid_native_contributions')
         seen=set()
         for pair in pairs:
-            exact(pair,('task_id','session_id','attempt_id'))
+            exact(pair,('task_id','session_id','attempt_id'),('duty_version_id',))
+            if any(v is not None and not isinstance(v,str) for v in pair.values()):raise ChangeError('invalid_native_contributions')
+            if pair.get('duty_version_id') is not None:
+                duty=self.s.get(project,'thread_duties',pair['duty_version_id'])
+                if duty['session_id']!=pair['session_id'] or duty['status']!='confirmed':raise ChangeError('inapplicable_contribution_duty')
             if any(v is not None and not isinstance(v,str) for v in pair.values()):raise ChangeError('invalid_native_contributions')
             if (pair['task_id'] is not None and pair['task_id'] not in matches['tasks']) or (pair['task_id'] is None and matches['tasks']) or (pair['session_id'] is not None and pair['session_id'] not in matches['sessions']) or (pair['attempt_id'] is not None and pair['attempt_id'] not in matches['attempts']):
                 raise ChangeError('native_contribution_outside_selection')
@@ -300,6 +310,8 @@ class Native:
                          parsed_sha256=attempt['result_sha256'],content_sha256=fingerprint,source_id=attempt['source_id'])
             doc=self.s._insert(project,'native_documents',run_id=run['id'],position=position,version_id=version['id'],title=d['title'],
                                locator_json=canonical(locator),findings_json=canonical(f))
+            from .native_threads import establish_identities
+            establish_identities(self.s,project,f)
             matches=self.match(project,d['title'],f)
             self.s._insert(project,'native_decisions',document_id=doc['id'],base_revision=self.s.project(project)['revision'],
                            matches_json=canonical(matches),basis='Automatic rules; imported claims are unverified.',supersedes_id=None)
@@ -308,7 +320,8 @@ class Native:
     def document(self,project,identity):
         d=self.s.get(project,'native_documents',identity)
         decision=self.decision(project,identity)
-        return dict(d,locator=json.loads(d['locator_json']),findings=json.loads(d['findings_json']),
+        from .native_threads import suggestions
+        return dict(d,suggestions=suggestions(self,project,d,decision),locator=json.loads(d['locator_json']),findings=json.loads(d['findings_json']),
                     decision=dict(decision,matches=json.loads(decision['matches_json'])),
                     relation=self.relation(project,d['version_id']),
                     proposals=sorted([r for r in self.s.records(project,'native_proposals') if r['document_id']==identity],key=lambda r:(r['created_at'],r['id'])))
@@ -345,14 +358,18 @@ class Native:
         return list(groups.values())
 
     def context(self,project,context):
-        exact(context,('document_id','decision_id','relation_id'))
+        exact(context,('document_id','decision_id','relation_id'),('suggestion_id',))
         d=self.document(project,context['document_id'])
         if d['decision']['id']!=context['decision_id'] or (d['relation'] or {}).get('id')!=context['relation_id']:
             raise ChangeError('native_context_changed')
-        return dict(decision=d['decision'],relation=d['relation'],
-                    safety=self.requirements(project,document_id=d['id']))
+        result=dict(decision=d['decision'],relation=d['relation'],safety=self.requirements(project,document_id=d['id']))
+        if 'suggestion_id' in context:
+            suggestion=next((v for v in d['suggestions'] if v['id']==context['suggestion_id']),None)
+            if suggestion is None:raise ChangeError('native_suggestion_stale')
+            result['suggestion']=suggestion
+        return result
 
-    def requirements(self,project,*,document_id=None,version_id=None,target_id=None):
+    def requirements(self,project,*,document_id=None,version_id=None,target_id=None,thread_id=None,duty=None):
         """Server-derived minimum review risk, also for manual native-version candidates.
 
         A caller may add concerns, but cannot suppress known conflicts by
@@ -361,9 +378,46 @@ class Native:
         docs=[self.document(project,d['id']) for d in self.s.records(project,'native_documents')
               if d['id']==document_id or d['version_id']==version_id]
         ids={d['id'] for d in docs};fact_conflicts={};flags=set();constraints=[]
+        # Safety dependencies follow stable identity, independently of display
+        # grouping. Long-lived Thread duties need not belong to any Task/title.
+        threads={t for d in docs for t in d['decision']['matches']['sessions']}
+        if thread_id is not None:
+            self.s.get(project,'sessions',thread_id)
+            threads.add(thread_id)
+        from .native_threads import LABELS as DUTY_LABELS
+        def duty_value(key,value):
+            if key=='auxiliary':return tuple(sorted(norm(v) for v in re.split(r'[;；]',value) if v.strip()))
+            return norm(value)
+        duty_claims={}
+        for doc in docs:
+            for fact in doc['findings']['facts']:
+                key=DUTY_LABELS.get(fact['key'])
+                if key in ('main','auxiliary'):duty_claims.setdefault(key,set()).add(duty_value(key,fact['value']))
+        if duty is not None:
+            if duty['main'] is not None:duty_claims.setdefault('main',set()).add(duty_value('main',duty['main']))
+            duty_claims.setdefault('auxiliary',set()).add(tuple(sorted(norm(v) for v in duty['auxiliary'])))
+        dependencies=[]
+        for row in self.s.records(project,'native_documents') if threads else []:
+            matched=self.decision(project,row['id']);matches=json.loads(matched['matches_json'])
+            # Unresolved Task/Attempt attribution does not erase a known Thread
+            # risk claim. Ambiguous claims remain unverified, conservatively.
+            if not threads.intersection(matches['sessions']):continue
+            related=json.loads(row['findings_json']);locator=json.loads(row['locator_json'])
+            relevant_flags=set(related['flags'])
+            for fact in related['facts']:
+                key=DUTY_LABELS.get(fact['key'])
+                if key in duty_claims and duty_value(key,fact['value']) not in duty_claims[key]:relevant_flags.add('Conflicting Thread declaration: '+key)
+            flags.update(relevant_flags)
+            if not relevant_flags:continue
+            dependencies.append(dict(document_id=row['id'],decision_id=matched['id'],version_id=row['version_id'],
+                source_id=locator['source_id'],flags=sorted(relevant_flags)))
+        dependencies.sort(key=lambda v:v['document_id'])
         for g in self.groups(project) if docs else []:
             if any(c['document_id'] in ids for c in g['components']):
                 for c in g['conflicts']:fact_conflicts.setdefault(c['key'],set()).update(c['values'])
+                for component in g['components']:
+                    related=self.s.get(project,'native_documents',component['document_id'])
+                    flags.update(json.loads(related['findings_json'])['flags'])
         tasks={t['task_id']:t for t in self.s.formal_state(project)['tasks']} if docs else {}
         for d in docs:
             f=d['findings'];flags.update(f['flags'])
@@ -379,7 +433,9 @@ class Native:
         constraints.sort(key=lambda c:(c['task_id'],c['field'],c['imported']))
         conflicts=sorted(flags|{'Conflicting fact: '+f['key'] for f in facts}|
                          {'Imported '+c['field']+' differs from formal task '+c['task_id'] for c in constraints})
-        return dict(conflicts=conflicts,facts=facts,constraints=constraints)
+        result=dict(conflicts=conflicts,facts=facts,constraints=constraints)
+        if threads:result['thread_risk_dependencies']=dependencies
+        return result
 
     @native_write
     def correct(self,project,identity,request):
@@ -443,16 +499,20 @@ class Native:
         if m['pending'] or task not in m['tasks']:raise ChangeError('native_attribution_unresolved')
         for pair in m['contributions']:
             if pair['task_id']!=task or pair['session_id'] is None:continue
-            self.s.link_task_session(project,task,pair['session_id'])
-            if pair['attempt_id'] is not None:self.s.link_attempt_session(project,pair['attempt_id'],pair['session_id'])
+            self.s.link_task_session(project,task,pair['session_id'],duty_version_id=pair.get('duty_version_id'))
+            if pair['attempt_id'] is not None:self.s.link_attempt_session(project,pair['attempt_id'],pair['session_id'],duty_version_id=pair.get('duty_version_id'))
         same_source=self.c.execute('''SELECT count(*) FROM native_documents d JOIN native_runs r
             ON r.project_id=d.project_id AND r.id=d.run_id WHERE d.project_id=? AND r.source_id=?''',
             (project,d['locator']['source_id'])).fetchone()[0]
         if same_source==1 and len(m['tasks'])==1 and len(m['contributions'])==1:
             source=d['locator']['source_id'];old=self.s.attribution(project,source)
             selected=m['contributions'][0]
-            if any(old[k]!=v for k,v in selected.items()):
+            if any(old[k]!=selected[k] for k in ('task_id','session_id','attempt_id')):
                 self.s.attribute_source(project,source,**selected,supersedes_id=old['id'],reason='Reviewed native candidate '+context['document_id'])
+            elif selected.get('duty_version_id') is not None:
+                binding=self.c.execute('SELECT duty_id FROM contribution_duties WHERE project_id=? AND relation_key=?',
+                    (project,'source:'+old['id'])).fetchone()
+                if not binding or binding['duty_id']!=selected['duty_version_id']:raise ChangeError('contribution_duty_conflict')
 
     @native_write
     def propose(self,project,identity,request):
@@ -486,14 +546,18 @@ class Native:
         for title in dict.fromkeys(titles):
             payload=dict(title=title,goal=f['goal'],completion_conditions=f['completion_conditions'])
             if not any(all(t[k]==v for k,v in payload.items()) for t in formal['tasks']):specs.append(dict(operation='task.create',payload=payload))
+        from .native_threads import actionable
+        specs.extend(actionable(self,project,d))
         out=[]
         for spec in specs:
+            candidate_context=spec.pop('_context',context)
             required=self.requirements(project,document_id=identity,
                 version_id=spec.get('target_version_id'),target_id=spec.get('target_id'))
             conflicts=sorted(set(initial_conflicts+required['conflicts']))
             existing=None
             for row in self.s.records(project,'candidate_specs'):
                 c=Changes(self.s).spec(project,row['candidate_id'])
+                if spec['operation'] not in ('task.create','version.confirm') and c['spec'].get('native_context')!=candidate_context:continue
                 if c['processing'] not in ('superseded','applied') and c['spec'].get('native_context') and c['spec']['base_revision']==base and all(c['spec'].get(k)==v for k,v in spec.items()):
                     # Changed native context or conflict evidence must get a new
                     # reviewed candidate; never recycle a stale approval.
@@ -506,7 +570,7 @@ class Native:
                         existing=c;break
             candidate=existing or self.s.save_candidate(project,dict(base_revision=base,source_ids=[d['locator']['source_id']],
                     conflicts=conflicts,impact='Native sourced proposal; confirm exact version and declared Task/Session/Attempt contributions. No authority, applicability or acceptance. Historical contributions remain if confirmation is revoked.',
-                    native_context=context,**spec))
+                    native_context=candidate_context,**spec))
             old=self.c.execute('SELECT 1 FROM native_proposals WHERE project_id=? AND document_id=? AND decision_id=? AND candidate_id=?',
                                (project,identity,decision['id'],candidate['candidate_id'])).fetchone()
             if not old:self.s._insert(project,'native_proposals',document_id=identity,decision_id=decision['id'],candidate_id=candidate['candidate_id'])

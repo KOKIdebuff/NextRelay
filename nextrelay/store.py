@@ -187,16 +187,24 @@ class Store:
                             title=text_value(title, 'title'), **external(namespace, external_id))
 
     @operation(write=True)
-    def link_task_session(self, project_id, task_id, session_id):
+    def link_task_session(self, project_id, task_id, session_id, *, duty_version_id=None):
         self._get(project_id, 'tasks', task_id)
         self._get(project_id, 'sessions', session_id)
+        existed=self._connection.execute('SELECT 1 FROM task_sessions WHERE project_id=? AND task_id=? AND session_id=?',(project_id,task_id,session_id)).fetchone()
         self._link(project_id, 'task_sessions', task_id=task_id, session_id=session_id)
+        from .threads import Threads
+        Threads(self).capture(project_id,session_id,'task:'+task_id+':'+session_id,task_id=task_id,
+                              duty_version_id=duty_version_id,existing=bool(existed))
 
     @operation(write=True)
-    def link_attempt_session(self, project_id, attempt_id, session_id):
+    def link_attempt_session(self, project_id, attempt_id, session_id, *, duty_version_id=None):
         attempt = self._get(project_id, 'attempts', attempt_id)
         self.link_task_session(project_id, attempt['task_id'], session_id)
+        existed=self._connection.execute('SELECT 1 FROM attempt_sessions WHERE project_id=? AND attempt_id=? AND session_id=?',(project_id,attempt_id,session_id)).fetchone()
         self._link(project_id, 'attempt_sessions', task_id=attempt['task_id'], attempt_id=attempt_id, session_id=session_id)
+        from .threads import Threads
+        Threads(self).capture(project_id,session_id,'attempt:'+attempt_id+':'+session_id,task_id=attempt['task_id'],attempt_id=attempt_id,
+                              duty_version_id=duty_version_id,existing=bool(existed))
 
     @operation(write=True)
     def create_source(self, project_id, *, namespace=None, external_id=None, reference=None,
@@ -220,7 +228,7 @@ class Store:
 
     @operation(write=True)
     def attribute_source(self, project_id, source_id, *, task_id=None, session_id=None, attempt_id=None,
-                         supersedes_id=None, reason):
+                         supersedes_id=None, reason, duty_version_id=None):
         self._get(project_id, 'sources', source_id)
         for kind, value in (('tasks', task_id), ('sessions', session_id), ('attempts', attempt_id)):
             if value is not None:
@@ -231,9 +239,15 @@ class Store:
             old = self._get(project_id, 'source_attributions', supersedes_id)
             if old['source_id'] != source_id:
                 raise ValueError('Correction must preserve the original source')
-        return self._insert(project_id, 'source_attributions', source_id=source_id, task_id=task_id,
+        result = self._insert(project_id, 'source_attributions', source_id=source_id, task_id=task_id,
                             session_id=session_id, attempt_id=attempt_id, supersedes_id=supersedes_id,
                             reason=text_value(reason, 'reason'))
+        from .threads import Threads
+        if session_id is None and duty_version_id is not None:
+            from .changes import ChangeError
+            raise ChangeError('duty_requires_thread')
+        Threads(self).capture(project_id,session_id,'source:'+result['id'],task_id=task_id,attempt_id=attempt_id,attribution_id=result['id'],duty_version_id=duty_version_id)
+        return result
 
     @operation()
     def attribution(self, project_id, source_id):
@@ -392,3 +406,8 @@ class Store:
     def preview_reversal(self, project_id, original_change_id):
         from .reversals import Reversals
         return Reversals(self).preview(project_id, original_change_id)
+
+    @operation()
+    def thread_state(self, project_id, *, thread_id=None, task_id=None):
+        from .threads import Threads
+        return Threads(self).listing(project_id,thread=thread_id,task=task_id)

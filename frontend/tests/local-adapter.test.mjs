@@ -1,3 +1,4 @@
+import { githubPanel } from '../src/github-ui.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LocalAdapter, encodeFile } from '../src/local-adapter.js';
@@ -42,4 +43,42 @@ test('browser recovery metadata cannot inject a request body or remote credentia
   const a=new LocalAdapter('private',{storage:store,fetchImpl:async(path,options)=>{assert.equal(path,'/api/requests/synthetic-key');assert.equal(options.method,'GET');return response(200,{state:'not-committed',result:null});}});
   assert.equal(a.pending.body,undefined);await a.resume();
   await assert.rejects(a.request('https://evil.invalid/api/'),/同源/);
+});
+
+
+test('model consent needs actual preview and uses a distinct server-bound decision route',async()=>{
+  const calls=[];const a=new LocalAdapter('temporary',{storage,fetchImpl:async(path,options)=>{calls.push({path,...options});return response(200,{requests:[{body:'synthetic request preview'}]});}});
+  a.projectId='p';a.view={modelBatches:[{id:'b',fingerprint:'exact-manifest'}]};a.read=async()=>a.view;
+  await assert.rejects(a.submit({type:'model-decision',id:'b',decision:'approved'}),/预览/);assert.equal(calls.length,0);
+  await a.submit({type:'model-preview',id:'b'});assert.equal(calls[0].method,'GET');
+  await a.submit({type:'model-decision',id:'b',decision:'approved'});
+  assert.equal(calls[1].path,'/api/projects/p/model-batches/b/decision');assert.deepEqual(JSON.parse(calls[1].body),{fingerprint:'exact-manifest',decision:'approved'});
+  assert(!calls.some(c=>c.path.endsWith('/execute')||c.path.endsWith('/reviews')||c.path.endsWith('/commits')));
+  await a.submit({type:'model-decision',id:'b',decision:'denied'});assert.equal(a.modelPreviews.has('b'),false);
+});
+
+test('GitHub UI intents use exact preview confirmation and never imply model or formal approval',async()=>{
+  const calls=[];const a=new LocalAdapter('temporary',{storage,fetchImpl:async(path,options)=>{calls.push({path,...options});return response(200,{});}});
+  a.projectId='p';a.read=async()=>({githubSnapshots:[]});
+  await a.submit({type:'github-prepare',url:'https://github.com/a/b',ref:'feature/docs'});
+  assert.deepEqual(JSON.parse(calls[0].body),{url:'https://github.com/a/b',storage_choice:'configured-local',ref:'feature/docs'});
+  await a.submit({type:'github-action',id:'snapshot',action:'confirm',body:{scope_id:'scope',fingerprint:'exact'}});
+  assert.equal(calls[1].path,'/api/projects/p/github/snapshot/confirm');assert.deepEqual(JSON.parse(calls[1].body),{scope_id:'scope',fingerprint:'exact'});
+  assert(!calls.some(c=>/model-batches|reviews|commits/.test(c.path)));
+});
+
+
+test('interrupted pinned preparation exposes original-commit retry while unpinned failure only updates',()=>{
+  const snapshot={id:'snapshot',state:'failed',git_commit:'a'.repeat(40),input:{url:'https://github.com/a/b'},repo:'a/b',scopes:[],entries:[],unknown_ranges:[],content_reads:0,content_bytes:0,content_reserved:0,metadata_bytes:0,metadata_reserved:0};
+  const render=b=>githubPanel({capabilities:{local_storage:{directory:'synthetic'}},githubSnapshots:[b]},x=>String(x??''),(action,label,kind,attrs)=>`<button data-action="${action}" ${attrs}>${label}</button>`);
+  const pinned=render(snapshot);assert(pinned.includes('data-op="retry"'));assert(!pinned.includes('data-op="read"'));assert(!pinned.includes('data-op="expand"'));
+  const unpinned=render({...snapshot,git_commit:null});assert(!unpinned.includes('data-op="retry"'));assert(unpinned.includes('data-op="update"'));
+});
+
+
+test('new UI preparations explicitly select model/2 while approvals remain fingerprint bound',async()=>{
+  const calls=[];const a=new LocalAdapter('synthetic-token',{fetchImpl:async(path,options={})=>{calls.push({path,...options});return {ok:true,json:async()=>({})};},storage:null});
+  a.projectId='p';a.read=async()=>({});
+  await a.submit({type:'model-prepare',importBatchId:'synthetic-import'});
+  assert.deepEqual(JSON.parse(calls[0].body),{import_batch_id:'synthetic-import',protocol:'nextrelay.model/2'});
 });

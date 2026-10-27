@@ -14,9 +14,12 @@ from .ingestion import ImportService, SelectedFile
 from . import localfiles
 from .store import unit_of_work
 from .native import Native, NativeService
+from .model import ModelService
+from .github import GitHubService
 
 MAX_REQUEST = (MAX_BATCH * 4 // 3) + 128 * 1024
-HISTORY = ('change_commits','applied_changes','baseline_history','effect_corrections','reversal_previews')
+HISTORY = ('change_commits','applied_changes','baseline_history','effect_corrections','reversal_previews',
+           'thread_duties','task_participation','task_leads','thread_successions','contribution_duties')
 
 
 def upload_path(root,project,key,index):
@@ -53,14 +56,14 @@ def cleanup_upload(path,expected_sha):
         return False
 
 
-def read_json(env):
+def read_json(env, *, limit=MAX_REQUEST):
     if env.get('CONTENT_TYPE','').split(';')[0] != 'application/json':
         raise AccessError(415,'json_required')
     try:
         size = int(env.get('CONTENT_LENGTH','0'))
     except ValueError:
         raise AccessError(400,'invalid_content_length') from None
-    if not 0 < size <= MAX_REQUEST:
+    if not 0 < size <= limit:
         raise AccessError(413,'request_size_limit')
     raw = env['wsgi.input'].read(size)
     if len(raw) != size:
@@ -97,9 +100,13 @@ class BusinessAPI:
             raise AccessError(409,'local_storage_not_configured')
         return ImportService(self.settings.database,self.principal,self.settings.local_root)
 
+    def model_service(self):
+        return ModelService(self.importer(),self.settings.model)
+
     def receipt(self, store, key, route, body, operation):
         fingerprint = digest(body)
         c = store._connection
+        if c.execute('SELECT 1 FROM github_requests WHERE created_by=? AND request_key=?',(self.principal.subject,key)).fetchone():raise ChangeError('idempotency_key_reused')
         old = c.execute('SELECT * FROM http_receipts WHERE subject=? AND request_key=?',
                         (self.principal.subject,key)).fetchone()
         if old:
@@ -135,11 +142,26 @@ class BusinessAPI:
         if path.startswith('/api/requests/') and method=='GET':
             key=path.removeprefix('/api/requests/')
             with unit_of_work(self.settings.database,self.principal) as s:
+                row=s._connection.execute('SELECT snapshot_id,project_id FROM github_requests WHERE created_by=? AND request_key=?',(self.principal.subject,key)).fetchone()
+                if row:
+                    s.project(row['project_id'])
+                    outcome=s._connection.execute('''SELECT o.state,o.code,o.http_status FROM github_request_results o
+                        JOIN github_requests r ON r.id=o.request_id WHERE r.created_by=? AND r.request_key=?''',(self.principal.subject,key)).fetchone()
+                    return {'state':outcome['state'] if outcome else 'registered','result':dict(row),
+                            'error':dict(outcome) if outcome and outcome['state']=='failed' else None}
                 old=s._connection.execute('SELECT * FROM http_receipts WHERE subject=? AND request_key=?',(self.principal.subject,key)).fetchone()
                 if old:
                     route=old['route'].strip('/').split('/')
                     if len(route)>2:s.project(route[2])
                     return {'state':'committed','result':json.loads(old['result_json'])}
+                row=s._connection.execute('''SELECT r.batch_id,r.route,r.project_id FROM model_requests r JOIN projects p ON p.id=r.project_id
+                    WHERE p.owner_subject=? AND r.created_by=? AND r.request_key=?''',(self.principal.subject,self.principal.subject,key)).fetchone()
+                if row:return {'state':'registered','result':dict(row)}
+                # T09 preparation/send identities survive interrupted responses;
+                # execute replays cannot repeat a consumed external send.
+                row=s._connection.execute('''SELECT b.id,b.project_id FROM model_batches b JOIN projects p ON p.id=b.project_id
+                    WHERE p.owner_subject=? AND b.request_key=?''',(self.principal.subject,key)).fetchone()
+                if row:return {'state':'registered','result':dict(row)}
                 # Uploads have their own durable T07 registration/attempt journal.
                 row=s._connection.execute('''SELECT b.id,b.project_id FROM ingest_batches b JOIN projects p ON p.id=b.project_id
                     WHERE p.owner_subject=? AND b.request_key=?''',(self.principal.subject,key)).fetchone()
@@ -152,7 +174,7 @@ class BusinessAPI:
             return dict(mode='local',data='synthetic-only',
                 local_storage={'choice':'configured-local','directory':str(self.settings.local_root) if self.settings.local_root else None},
                 limits={'files':MAX_FILES,'file_bytes':MAX_FILE,'batch_bytes':MAX_BATCH},
-                capabilities={'format_parse':True,'semantic_extraction':True,'context_sync':False,'cloud_storage':False})
+                capabilities={'format_parse':True,'semantic_extraction':True,'context_sync':False,'cloud_storage':False,'model_processing':bool(self.settings.model and self.settings.model.provider!='disabled')})
         parts=path.strip('/').split('/')
         if parts[:2]!=['api','projects']:
             raise AccessError(404,'route_not_found')
@@ -170,6 +192,45 @@ class BusinessAPI:
         # Authorization precedes body parsing, replay lookup, disk reads and writes.
         with unit_of_work(self.settings.database,self.principal) as s:
             s.project(project)
+        if method=='POST' and (not tail or tail[0]!='github'):
+            with unit_of_work(self.settings.database,self.principal) as s:
+                if s._connection.execute('SELECT 1 FROM github_requests WHERE created_by=? AND request_key=?',(self.principal.subject,request_key(env))).fetchone():raise ChangeError('idempotency_key_reused')
+        if tail and tail[0]=='github':
+            service=GitHubService(self.importer(),self.settings.github)
+            if method=='GET':
+                if len(tail)==1:return {'snapshots':service.listing(project)}
+                if len(tail)==2:return service.get(project,tail[1])
+            if method=='POST':
+                body=read_json(env,limit=128*1024);key=request_key(env)
+                if len(tail)==1:return service.action(project,key,'prepare',body)
+                if len(tail)==3:return service.action(project,key,tail[2],body,tail[1])
+            raise AccessError(404,'route_not_found')
+        if tail and tail[0]=='model-batches':
+            service=self.model_service()
+            if method=='GET':
+                if len(tail)==1:return {'batches':service.listing(project)}
+                if len(tail)==2:return service.get(project,tail[1])
+                if len(tail)==3 and tail[2]=='preview':return service.preview(project,tail[1])
+            if method=='POST':
+                body=read_json(env);key=request_key(env)
+                if len(tail)==1:return service.prepare(project,key,body)
+                if len(tail)==3 and tail[2] in ('decision','execute','recover'):
+                    exact(body,('fingerprint','decision') if tail[2]=='decision' else ())
+                    with unit_of_work(self.settings.database,self.principal,write=True) as s:
+                        s.get(project,'model_batches',tail[1])
+                        prior=s._connection.execute('SELECT * FROM model_requests WHERE created_by=? AND request_key=?',(self.principal.subject,key)).fetchone()
+                        if prior:
+                            if prior['project_id']!=project or prior['route']!=path or prior['fingerprint']!=digest(body):raise ChangeError('idempotency_key_reused')
+                        else:
+                            if s._connection.execute('SELECT 1 FROM http_receipts WHERE subject=? AND request_key=?',(self.principal.subject,key)).fetchone():raise ChangeError('idempotency_key_reused')
+                            s._insert(project,'model_requests',batch_id=tail[1],request_key=key,route=path,fingerprint=digest(body))
+                    # Registration is durable before any external side effect; query
+                    # recovery says registered, never falsely says not committed.
+                    if tail[2]=='decision':
+                        service.decide(project,tail[1],body['fingerprint'],body['decision'])
+                        return service.get(project,tail[1])
+                    return getattr(service,tail[2])(project,tail[1])
+            raise AccessError(404,'route_not_found')
         if method=='GET':
             if tail and tail[0]=='imports':
                 imp=self.importer()
@@ -191,6 +252,9 @@ class BusinessAPI:
                 if not tail:return s.project(project)
                 if tail==['snapshot']:return self.snapshot(s,project)
                 if tail==['formal']:return s.formal_state(project)
+                if tail==['threads']:return s.thread_state(project)
+                if len(tail)==2 and tail[0]=='threads':return s.thread_state(project,thread_id=tail[1])
+                if len(tail)==3 and tail[0]=='tasks' and tail[2]=='participation':return s.thread_state(project,task_id=tail[1])
                 if tail==['candidates']:return self.candidates(s,project)
                 if tail==['history']:return {k:s.records(project,k) for k in HISTORY}
                 if tail==['native']:return Native(s).listing(project)
@@ -255,12 +319,12 @@ class BusinessAPI:
                     if tail[3]=='candidates':return n.propose(project,tail[2],body)
                 if len(tail)==4 and tail[:2]==['native','versions'] and tail[3]=='correct':
                     return Native(s).correct_relation(project,tail[2],body)
-                if tail==['sessions']:
+                if tail in (['sessions'],['threads']):
                     exact(body,('title',),('namespace','external_id'));return s.create_session(project,**body)
                 if tail==['attempts']:
                     exact(body,('task_id','title'),('namespace','external_id'));return s.create_attempt(project,**body)
                 if len(tail)==3 and tail[0]=='attempts' and tail[2]=='sessions':
-                    exact(body,('session_id',));s.link_attempt_session(project,tail[1],body['session_id']);return {'linked':True}
+                    exact(body,('session_id',),('duty_version_id',));s.link_attempt_session(project,tail[1],**body);return {'linked':True}
                 if tail==['candidates']:
                     c=s.save_candidate(project,body)
                     return dict(c,authorization=Changes(s).authorization(c))
